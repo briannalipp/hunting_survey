@@ -5,9 +5,7 @@
 ## a data dictionary alongside the cleaned data.
 ## =============================================================================
 
-library(tidyr)
 library(here)
-library(dplyr)
 library(tidyverse)
 
 # -----------------------------------------------------------------------------
