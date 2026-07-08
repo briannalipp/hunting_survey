@@ -66,7 +66,7 @@ lv_conservation <- c("Critically endangered", "Threatened", "Of concern/vulnerab
 # Q1 (species liking) and Q2 (hunting approval) were answered for all 17
 # species. Q3-Q10 (characteristics) were only collected for the 5 species
 # randomly assigned to that respondent -- those columns are blank (NA) for
-# the other 12 species-rows. Make a species_shown flag so its easy to filter.
+# the other 12 species-rows. Species_shown flag so its easy to filter.
 
 species_core <- raw_data %>%
   transmute(participant_id = ResponseId, across(matches("^Q(1|2|3|4|5|6|7|8|9|10)_[0-9]+$"))) %>%
@@ -101,9 +101,7 @@ species_long <- species_core %>%
     species_shown,
     attitude              = likert_to_num(Q1, lv_attitude),
     hunting_approval      = likert_to_num(Q2, lv_approve),
-    conservation_status   = factor(if_else(Q3 == "I don't know", NA_character_, Q3),
-                                   levels = lv_conservation, ordered = TRUE),
-    conservation_dontknow = Q3 == "I don't know",
+    conservation_status   = likert_to_num(Q3, lv_conservation),
     edibility             = likert_to_num(Q4, lv_edibility),
     familiarity           = likert_to_num(Q5, lv_familiarity),
     desire_to_see         = likert_to_num(Q6, lv_desire_see),
@@ -248,7 +246,7 @@ species_long <- species_long %>% left_join(person_covariates, by = "participant_
 attacc_long   <- attacc_long   %>% left_join(person_covariates, by = "participant_id")
 
 # -----------------------------------------------------------------------------
-# 7. Write outputs
+# OUTPUTS
 # -----------------------------------------------------------------------------
 write_csv(species_long, "species_long.csv")
 write_csv(attacc_long,   "attacc_long.csv")
