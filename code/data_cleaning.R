@@ -295,6 +295,6 @@ survey_design <- personal_weights %>%
 # -----------------------------------------------------------------------------
 saveRDS(species_responses, here("data", "species_responses.rds"))
 saveRDS(attacc_long,       here("data", "attacc_long.rds"))
-saveRDS(personal_weights,          here("data", "personal.rds"))
+saveRDS(personal_weights,          here("data", "personal_weights.rds"))
 saveRDS(survey_design,     here("data", "survey_design.rds"))
 
