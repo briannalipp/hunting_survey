@@ -21,10 +21,7 @@ rownames(data) <- NULL
 data <- data %>%
   filter(!is.na(vsid) & vsid != "")
 
-#Cleaning out duplicate IDs and known bad rows
-data <- data %>%
-  slice(-c(1515, 1533, 1586, 1552, 1538))
-
+#Clean out duplicate IDs
 data <- data %>%
   filter(!vsid %in% c(
     "06ae6ed6-3521-4d09-8f4c-08bd677458d8",
@@ -275,9 +272,22 @@ VS_demo <- read.csv(here("data", "demographics.csv"),
 personal <- personal %>%
   left_join(VS_demo, by = "vsid")
 
+
 #############################
 ###   Access demographics and hunting context questions via "personal".   ###
 #############################
+
+
+# -----------------------------------------------------------------------------
+# CREATING SURVEY OBJECT
+# -----------------------------------------------------------------------------
+personal_weights <- personal %>%
+  filter(!is.na(weight))
+
+survey_design <- personal_weights %>%
+  as_survey_design(
+    ids = 1,
+    weights = weight)
 
 
 # -----------------------------------------------------------------------------
@@ -285,5 +295,6 @@ personal <- personal %>%
 # -----------------------------------------------------------------------------
 saveRDS(species_responses, here("data", "species_responses.rds"))
 saveRDS(attacc_long,       here("data", "attacc_long.rds"))
-saveRDS(personal,          here("data", "personal.rds"))
+saveRDS(personal_weights,          here("data", "personal.rds"))
+saveRDS(survey_design,     here("data", "survey_design.rds"))
 
