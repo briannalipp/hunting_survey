@@ -280,6 +280,12 @@ personal <- personal %>%
 #############################
 
 
+# -----------------------------------------------------------------------------
+# SAVE CLEANED DATA
+# -----------------------------------------------------------------------------
+saveRDS(species_responses, here("data", "species_responses.rds"))
+saveRDS(attacc_long,       here("data", "attacc_long.rds"))
+saveRDS(personal,          here("data", "personal.rds"))
 
 
 
