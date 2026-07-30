@@ -112,7 +112,7 @@ ggplot(cat_summary, aes(x = category, y = mean, color = support_type, ymin = mea
 
 
 
-```{r, echo=F, include=T}
+```{r reasons, echo=F, include=T}
 # Gather the data into a long format
 long_data <- personal_weights %>%
   select(vsid, weight, reason_food, reason_recreation, reason_population_control, 
@@ -154,6 +154,45 @@ ggplot(long_data, aes(x = response, weight = weight)) +
   theme_minimal() +
   theme(legend.position = "none") +
   ylim(0, 0.475)
+```
+```{r methods, echo=F, include=T}
+# Gather the data into a long format
+long_data_methods <- personal_weights %>%
+  select(vsid, weight, method_baiting, method_captive_hunt, method_trapping,
+         method_neck_snares, method_dogs_predators, method_dogs_birds,
+         method_aerial, method_bow, method_firearms) %>%
+  pivot_longer(cols = starts_with("method"), names_to = "method", values_to = "response")
+
+# Map original variable names to descriptive labels
+method_labels <- c(
+  method_baiting = "Baiting",
+  method_captive_hunt = "Captive",
+  method_trapping = "Trapping",
+  method_neck_snares = "Snares",
+  method_dogs_predators = "Hounds",
+  method_dogs_birds = "Bird Dogs",
+  method_aerial = "Drones",
+  method_bow = "Bow",
+  method_firearms = "Firearms"
+)
+
+# Calculate means for each method
+means_methods <- long_data_methods %>%
+  group_by(method) %>%
+  dplyr::summarize(mean_response = weighted.mean(response, weight, na.rm = TRUE))
+
+# Reorder 'method' factor based on the mean responses
+long_data_methods$method <- factor(long_data_methods$method, levels = means_methods$method[order(means_methods$mean_response)])
+
+# Create the weighted and smoothed density plots with facet wrapping and mean lines
+ggplot(long_data_methods, aes(x = response, weight = weight)) +
+  geom_density(alpha = 0.6, adjust = 2.5, fill = "gray50") +
+  geom_vline(data = means_methods, aes(xintercept = mean_response), color = "black", linetype = "dashed") +
+  facet_wrap(~ method, scales = "free_y", labeller = labeller(method = method_labels)) +
+  labs(x = "Acceptability (1 not, 5 yes)", y = "Density", title = "Methods of Hunting") +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  ylim(0, 0.35)
 ```
 
 
