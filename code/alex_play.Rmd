@@ -72,7 +72,6 @@ ggplot(long_data, aes(x = x_value, y = support_value, weight = weight, color = s
 ```
 And a pile of others that aren't numeric:
 ```{r more demos, echo=F, include=T, fig.height=20, fig.width=10}
-# Define categorical variables
 personal_weights <- personal_weights %>%
   mutate(across(c(gender, eats_meat, education, race, hispanic, region, metro, vote_2024, votechoice_2024), as.character))
 
@@ -82,6 +81,7 @@ cat_vars <- c("gender", "eats_meat", "education", "race", "hispanic", "region", 
 cat_data_long <- personal_weights %>%
   select(all_of(cat_vars), hunting_support, trapping_support, weight) %>%
   pivot_longer(cols = all_of(cat_vars), names_to = "variable", values_to = "category") %>%
+  filter(!is.na(category) & category != "") %>%
   pivot_longer(cols = c(hunting_support, trapping_support),
                names_to = "support_type",
                values_to = "support_value") %>%
