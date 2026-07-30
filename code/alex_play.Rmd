@@ -1,0 +1,159 @@
+---
+title: "Initial Exploration of Generic Hunting Support/Opposition"
+author: "Alex Metcalf"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: journal
+    toc: true
+    toc_float: true
+---
+
+```{r load data, echo=F, warning=F, message=F}
+library(here)
+library(tidyverse)
+library(ggrepel)
+library(survey)
+library(srvyr)
+library(ggpubr)
+library(Hmisc)
+
+
+personal_weights  <- readRDS(here("data", "personal_weights.rds"))
+
+aplay <- personal_weights %>%
+  as_survey_design(
+    ids = vsid,
+    weights = weight)
+```
+
+First, I just wanted to look at overall support/opposition to hunting and trapping.
+
+Here is support for hunting and trapping by our lifestyle and personal interest variables:
+```{r lifestyle, fig.height=20, fig.width=10, echo=F, inlude=T, warning=F}
+personal_weights <- personal_weights %>%
+  mutate(across(c(has_pets, game_meat_freq, hunter_status, interested_in_hunting,
+                  political_ideology, hunted_ungulates, hunted_birds_smallgame, 
+                  hunted_predators, wvo_mutualism, wvo_domination, identify_hunters, 
+                  identify_ranchers, identify_environmentalists, identify_farmers,
+                  identify_small_business, identify_landowners, identify_outdoor_rec, 
+                  identify_outdoor_viewers, identify_anglers, christian_nationalism_score), as.numeric))
+
+long_data <- personal_weights %>%
+  select(has_pets, game_meat_freq, hunter_status, interested_in_hunting,
+         political_ideology, hunted_ungulates, hunted_birds_smallgame, hunted_predators,
+         wvo_mutualism, wvo_domination, identify_hunters, identify_ranchers, 
+         identify_environmentalists, identify_farmers, identify_small_business, 
+         identify_landowners, identify_outdoor_rec, identify_outdoor_viewers, 
+         identify_anglers, christian_nationalism_score,
+         hunting_support, trapping_support, weight) %>%
+  pivot_longer(cols = c(has_pets, game_meat_freq, hunter_status, interested_in_hunting,
+                        political_ideology, hunted_ungulates, hunted_birds_smallgame, 
+                        hunted_predators, wvo_mutualism, wvo_domination, identify_hunters, 
+                        identify_ranchers, identify_environmentalists, identify_farmers,
+                        identify_small_business, identify_landowners, identify_outdoor_rec, 
+                        identify_outdoor_viewers, identify_anglers, christian_nationalism_score),
+               names_to = "variable",
+               values_to = "x_value") %>%
+  pivot_longer(cols = c(hunting_support, trapping_support),
+               names_to = "support_type",
+               values_to = "support_value") %>%
+  mutate(support_type = factor(support_type, levels = c("hunting_support", "trapping_support")))
+
+ggplot(long_data, aes(x = x_value, y = support_value, weight = weight, color = support_type)) +
+  geom_smooth(method = "lm") +
+  stat_cor(aes(label = after_stat(r.label)), size = 3) +
+  scale_color_manual(values = c("hunting_support" = "orange", "trapping_support" = "forestgreen"),
+                     labels = c("Hunting", "Trapping")) +
+  facet_wrap(~ variable, scales = "free_x", ncol = 3) +
+  labs(x = "Variable Value", y = "Support Level", title = "Hunting and Trapping Support by Selected Variables") +
+  theme_minimal() +
+  theme(legend.position = "bottom", legend.title = element_blank())
+```
+And a pile of others that aren't numeric:
+```{r more demos, echo=F, include=T, fig.height=20, fig.width=10}
+# Define categorical variables
+personal_weights <- personal_weights %>%
+  mutate(across(c(gender, eats_meat, education, race, hispanic, region, metro, vote_2024, votechoice_2024), as.character))
+
+cat_vars <- c("gender", "eats_meat", "education", "race", "hispanic", "region", "metro", "vote_2024", "votechoice_2024")
+
+# Prepare long data
+cat_data_long <- personal_weights %>%
+  select(all_of(cat_vars), hunting_support, trapping_support, weight) %>%
+  pivot_longer(cols = all_of(cat_vars), names_to = "variable", values_to = "category") %>%
+  pivot_longer(cols = c(hunting_support, trapping_support),
+               names_to = "support_type",
+               values_to = "support_value") %>%
+  mutate(support_type = factor(support_type, levels = c("hunting_support", "trapping_support")))
+
+# Calculate weighted means and standard errors
+cat_summary <- cat_data_long %>%
+  group_by(variable, category, support_type) %>%
+  dplyr::summarize(
+    mean = weighted.mean(support_value, weight, na.rm = TRUE),
+    se = sqrt(Hmisc::wtd.var(support_value, weight, na.rm = TRUE) / n()),
+    .groups = "drop"
+  )
+
+# Plot
+ggplot(cat_summary, aes(x = category, y = mean, color = support_type, ymin = mean - 1.96*se, ymax = mean + 1.96*se)) +
+  geom_point(size = 2) +
+  geom_errorbar(width = 0.2) +
+  scale_color_manual(values = c("hunting_support" = "orange", "trapping_support" = "forestgreen"),
+                     labels = c("Hunting", "Trapping")) +
+  facet_wrap(~ variable, scales = "free_x", ncol = 3) +
+  labs(x = "Category", y = "Mean Support Level", title = "Hunting and Trapping Support by Categorical Variables") +
+  theme_minimal() +
+  theme(legend.position = "bottom", legend.title = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+
+
+```{r, echo=F, include=T}
+# Gather the data into a long format
+long_data <- personal_weights %>%
+  select(vsid, weight, reason_food, reason_recreation, reason_population_control, 
+         reason_trophy, reason_reduce_conflict, reason_conservation_revenue, 
+         reason_indigenous_practice, reason_cultural_tradition) %>%
+  pivot_longer(cols = starts_with("reason"), names_to = "reason", values_to = "response")
+
+# Map original variable names to descriptive labels
+reason_labels <- c(
+  reason_conservation_revenue = "Conservation Revenue",
+  reason_cultural_tradition = "Culture/Tradition",
+  reason_food = "Food",
+  reason_indigenous_practice = "Indigenous",
+  reason_population_control = "Pop. Control",
+  reason_recreation = "Recreation",
+  reason_reduce_conflict = "Reduce Conflict",
+  reason_trophy = "Trophy"
+)
+
+# Calculate means for each reason
+means <- long_data %>%
+  group_by(reason) %>%
+  dplyr::summarize(mean_response = weighted.mean(response, weight, na.rm = TRUE))
+
+# Calculate means for each reason
+means <- long_data %>%
+  group_by(reason) %>%
+  dplyr::summarize(mean_response = weighted.mean(response, weight, na.rm = TRUE))
+
+# Reorder 'reason' factor based on the mean responses
+long_data$reason <- factor(long_data$reason, levels = means$reason[order(means$mean_response)])
+
+# Create the weighted and smoothed density plots with facet wrapping and mean lines
+ggplot(long_data, aes(x = response, weight = weight)) +
+  geom_density(alpha = 0.6, adjust = 2.5, fill = "gray50") +
+  geom_vline(data = means, aes(xintercept = mean_response), color = "black", linetype = "dashed") +  # Add mean lines
+  facet_wrap(~ reason, scales = "free_y", labeller = labeller(reason = reason_labels)) +
+  labs(x = "Acceptability (1 not, 5 yes)", y = "Density", title = "Acceptance of Reasons for Hunting") +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  ylim(0, 0.475)
+```
+
+
