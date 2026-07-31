@@ -14,25 +14,24 @@ raw_data <- read.csv(here("data", "data.csv"), header = TRUE, stringsAsFactors =
 
 question_text <- raw_data[1, ]
 
-#Remove unwanted rows and columns, reset row #s
-data <- raw_data[-c(1, 2), -c(1:17, 270:288)]
-rownames(data) <- NULL
+#Remove unwanted rows and reset row #s
+edit_data <- raw_data[-c(1, 2), ]
+rownames(edit_data) <- NULL
 
-#Remove pilot data
-data <- data %>%
+#Filter out pilot data
+edit_data <- edit_data %>% 
   filter(!is.na(vsid) & vsid != "")
 
-#Clean out duplicate IDs
-data <- data %>%
-  filter(!vsid %in% c(
-    "06ae6ed6-3521-4d09-8f4c-08bd677458d8",
-    "de0e17b1-5a8e-44e7-b55b-35d28c43d2b7",
-    "981a6285-cc05-473e-a17b-79452e16d44e",
-    "8fd1e531-e397-4ab9-96ee-4b40c4795965",
-    "6fc52029-d8a3-4389-b8da-3f60b2a9d5dc",
-    "c856b79a-7165-4359-9e59-9bd60f2b307c",
-    "a3d82e53-05b1-4028-93af-9472d27440d3",
-    "53d87812-edea-434e-a16b-074fde11af3c"))
+#Remove duplicate attempts
+edit_data <- edit_data %>%
+  group_by(vsid) %>%
+  filter(n() == 1 | Finished == "TRUE") %>%
+  ungroup()
+
+#Remove unwanted columns
+data <- edit_data %>% 
+  select(-(1:17), -(270:288))
+
 
 # -----------------------------------------------------------------------------
 # CREATE SPECIES KEY
@@ -280,7 +279,7 @@ personal <- personal %>%
 
 
 # -----------------------------------------------------------------------------
-# CREATING SURVEY OBJECT
+# CREATING SURVEY OBJECT FOR PERSONAL STUFF
 # -----------------------------------------------------------------------------
 personal_weights <- personal %>%
   filter(!is.na(weight))
@@ -296,6 +295,6 @@ survey_design <- personal_weights %>%
 # -----------------------------------------------------------------------------
 saveRDS(species_responses, here("data", "species_responses.rds"))
 saveRDS(attacc_long,       here("data", "attacc_long.rds"))
-saveRDS(personal_weights,          here("data", "personal_weights.rds"))
+saveRDS(personal_weights,  here("data", "personal_weights.rds"))
 saveRDS(survey_design,     here("data", "survey_design.rds"))
 
