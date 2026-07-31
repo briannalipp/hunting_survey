@@ -27,7 +27,17 @@ species_design <- species_responses_weights %>%
     ids = vsid,
     weights = weight)
 
+###   Creating a Survey Design Object for Att/Acc Framework   ###
+attacc_weights <- attacc_long %>%
+  inner_join(
+    personal_weights %>%
+      select(vsid, weight),
+    by = "vsid")
 
+attacc_design <- attacc_weights %>%
+  as_survey_design(
+    ids = vsid,
+    weights = weight)
 
 
 
