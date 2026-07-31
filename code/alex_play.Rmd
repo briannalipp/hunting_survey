@@ -27,10 +27,55 @@ aplay <- personal_weights %>%
     weights = weight)
 ```
 
-First, I just wanted to look at overall support/opposition to hunting and trapping.
+First, I just wanted to look at overall support/opposition to hunting and trapping:
 
-Here is support for hunting and trapping by our lifestyle and personal interest variables:
-```{r lifestyle, fig.height=20, fig.width=10, echo=F, inlude=T, warning=F}
+```{r overall support, echo=F, include=T}
+# Calculate weighted means
+hunt_mean <- weighted.mean(personal_weights$hunting_support, personal_weights$weight, na.rm = TRUE)
+trap_mean <- weighted.mean(personal_weights$trapping_support, personal_weights$weight, na.rm = TRUE)
+
+# Calculate weighted % scoring 4 or 5
+hunt_pct <- sum(personal_weights$weight[personal_weights$hunting_support >= 4], na.rm = TRUE) / 
+            sum(personal_weights$weight, na.rm = TRUE) * 100
+
+trap_pct <- sum(personal_weights$weight[personal_weights$trapping_support >= 4], na.rm = TRUE) / 
+            sum(personal_weights$weight, na.rm = TRUE) * 100
+
+# Prepare long data
+long_data_support <- personal_weights %>%
+  select(hunting_support, trapping_support, weight) %>%
+  pivot_longer(cols = c(hunting_support, trapping_support),
+               names_to = "support_type",
+               values_to = "support_value") %>%
+  mutate(support_type = factor(support_type, levels = c("hunting_support", "trapping_support")))
+
+# Create annotation data frame
+annot <- data.frame(
+  support_type = factor(c("hunting_support", "trapping_support")),
+  label = c(paste0(round(hunt_pct, 1), "% support/strongly support"),
+            paste0(round(trap_pct, 1), "% support/strongly support")),
+  mean_val = c(hunt_mean, trap_mean)
+)
+
+# Plot
+ggplot(long_data_support, aes(x = support_value, weight = weight, color = support_type)) +
+  geom_density(adjust = 2, size = 1) +
+  geom_vline(data = annot, aes(xintercept = mean_val, color = support_type), linetype = "dashed") +
+  geom_text(data = annot, aes(x = 4.5, y = c(0.45, 0.40), label = label, color = support_type), 
+            size = 3, hjust = 1, inherit.aes = FALSE) +
+  scale_color_manual(values = c("hunting_support" = "#FF7B00", "trapping_support" = "#228B22"),
+                     labels = c("Hunting", "Trapping")) +
+  labs(x = "Support Level (1-5)", y = "Density", title = "Support for Hunting and Trapping") +
+  theme_minimal() +
+  theme(legend.position = "bottom", legend.title = element_blank()) +
+  ylim(0, 0.5)
+
+
+```
+
+
+Here is support for hunting and trapping by our lifestyle and personal characteristic variables:
+```{r lifestyle, fig.height=20, fig.width=10, echo=F, include=T, warning=F}
 personal_weights <- personal_weights %>%
   mutate(across(c(has_pets, game_meat_freq, hunter_status, interested_in_hunting,
                   political_ideology, hunted_ungulates, hunted_birds_smallgame, 
