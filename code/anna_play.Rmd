@@ -1,0 +1,258 @@
+---
+title: "anna play"
+output: html_document
+date: "2026-08-06"
+---
+
+```{r data, include=FALSE}
+data <- readRDS("C:/Users/ab206027/OneDrive - The University of Montana/Documents/hunting_survey/data/personal_weights.rds")
+species_responses <- readRDS("C:/Users/ab206027/OneDrive - The University of Montana/Documents/hunting_survey/data/species_responses.rds")
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(patchwork)
+
+reasons_gender <- data %>%
+  select(gender, starts_with("reason_"))
+
+data <- data %>%
+  pivot_longer(
+     cols = c(wvo_mutualism, wvo_domination),
+    names_to = "wvo_type",
+    values_to = "wvo_score"
+  )
+
+```
+
+## Reasons to Hunt by Gender
+
+Not much of a difference between males and females, seem to coincide with their acceptance of hunting. 
+
+```{r reasons, echo=FALSE}
+reason_summary <- data %>%
+  pivot_longer(
+    cols = starts_with("reason_"),
+    names_to = "reason",
+    values_to = "rating"
+  ) %>%
+  group_by(gender, reason) %>%
+  summarize(
+    mean = mean(rating, na.rm = TRUE),
+    se = sd(rating, na.rm = TRUE) / sqrt(sum(!is.na(rating))),
+    .groups = "drop"
+  )
+
+ggplot(
+  reason_summary,
+  aes(
+    x = gender,
+    y = mean,
+    color = gender,
+    ymin = mean - 1.96 * se,
+    ymax = mean + 1.96 * se
+  )
+) +
+  geom_point(size = 2) +
+  geom_errorbar(width = 0.2) +
+  facet_wrap(~ reason, ncol = 3) +
+  labs(
+    x = "Gender",
+    y = "Mean Rating",
+    title = "Hunting and Trapping Reasons by Gender"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+```
+
+## Methods of Hunting and Trapping
+
+It looks like similar to reasons to hunt, the differences in males and females remains consistent with overall acceptance of hunting.
+
+```{r methods, echo=FALSE}
+method_summary <- data %>%
+  pivot_longer(
+    cols = starts_with("method_"),
+    names_to = "method",
+    values_to = "rating"
+  ) %>%
+  group_by(gender, method) %>%
+  summarize(
+    mean = mean(rating, na.rm = TRUE),
+    se = sd(rating, na.rm = TRUE) / sqrt(sum(!is.na(rating))),
+    .groups = "drop"
+  )
+
+ggplot(
+  method_summary,
+  aes(
+    x = gender,
+    y = mean,
+    color = gender,
+    ymin = mean - 1.96 * se,
+    ymax = mean + 1.96 * se
+  )
+) +
+  geom_point(size = 2) +
+  geom_errorbar(width = 0.2) +
+  facet_wrap(~  method, ncol = 3) +
+  labs(
+    x = "Gender",
+    y = "Mean Rating",
+    title = "Hunting and Trapping Methods by Gender"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+## WVO? Can we break them?
+Can we use WVOs to predict acceptance of hunting and trapping?
+```{r WVO, echo=FALSE}
+ggplot(data, aes(x = wvo_score, y = hunting_support, color = wvo_type)) +
+  scale_x_continuous(limits = c(0, NA)) +
+  scale_y_continuous(limits = c(0, NA)) +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(
+    x = "WVO Score",
+    y = "Hunting Support",
+    color = "WVO",
+    title = "Hunting Support by WVO"
+  ) +
+  theme_minimal()
+
+ggplot(data, aes(x = wvo_score, y = trapping_support, color = wvo_type)) +
+  scale_x_continuous(limits = c(0, NA)) +
+  scale_y_continuous(limits = c(0, NA)) +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(
+    x = "WVO Score",
+    y = "Trupping Support",
+    color = "WVO",
+    title = "Trapping Acceptance by WVO"
+  ) +
+  theme_minimal()
+
+```
+
+Do WVOs break when asking about acceptance of different species? Or do they remain consistent with the mutualism/domination box?
+
+```{r speciesWVO, echo=FALSE}
+species_responses_wvo <- species_responses %>%
+  left_join(
+    data %>%
+      select(vsid, wvo_mutualism, wvo_domination),
+    by = "vsid"
+  )
+species_responses_wvo <- species_responses_wvo %>%
+  pivot_longer(
+    cols = c(wvo_mutualism, wvo_domination),
+    names_to = "wvo_type",
+    values_to = "wvo_score"
+  )
+
+ggplot(species_responses_wvo, aes(x = wvo_score, y = hunting_approval, color = wvo_type)) +
+  geom_smooth(method = "lm", se = TRUE) +
+  facet_wrap(~ species, ncol = 3) +
+  labs(
+    x = "WVO Score",
+    y = "Hunting Approval",
+    color = "WVO",
+    title = "Hunting Approval and WVO"
+  ) +
+  theme_minimal()
+
+```
+
+##Species Attitude and Acceptability
+It looks like for most species as attitude becomes better, acceptability of hunting becomes lower, except for elk and white-tailed deer
+
+```{r att app, echo=FALSE}
+ggplot(species_responses, aes(x = attitude, y = hunting_approval)) +
+  geom_smooth(method = "lm", se = TRUE) +
+  facet_wrap(~ species, ncol = 3) +
+  labs(
+    x = "Attitude",
+    y = "Hunting Approval",
+    title = "Species Hunting Approval and Atttitude"
+  ) +
+  theme_minimal()
+```
+Bald eagle and american robin, it doesn't matter what their conservation status is, it is always unacceptable to hunt.
+
+The second plot I need someone to check my read on what's happening.  To me it seems like for some species like, elephant, cougar, wolf, rattlesnake, shark, as perceptions of endangerment go down,people's attitudes towards them go down? Is that what right? Also could be a bad interpretation
+```{r att acc, echo=FALSE}
+ggplot(species_responses, aes(x = conservation_status, y = hunting_approval)) +
+  geom_smooth(method = "lm", se = TRUE) +
+  facet_wrap(~ species, ncol = 3) +
+  labs(
+    x = "Conservation Status",
+    y = "Hunting Approval",
+    title = "Species Conservation Status and Hunting Approval"
+  ) +
+  theme_minimal()
+
+ggplot(species_responses, aes(x = conservation_status, y = attitude)) +
+  geom_smooth(method = "lm", se = TRUE) +
+  facet_wrap(~ species, ncol = 3) +
+  labs(
+    x = "Conservation Status",
+    y = "Attitude",
+    title = "Species Conservation Status and Attitude"
+  ) +
+  theme_minimal()
+
+ggplot(species_responses, aes(x = familiarity, y = attitude)) +
+  geom_smooth(method = "lm", se = TRUE) +
+  facet_wrap(~ species, ncol = 3) +
+  labs(
+    x = "Familiarity",
+    y = "Attitude",
+    title = "Attitude towards Species and Familiarity"
+  ) +
+  theme_minimal()
+```
+
+## Back to WVO and Species Characteristics 
+
+```{r characteristics wvo, echo=FALSE}
+ggplot(species_responses_wvo, aes(x = wvo_score, y = danger_humans, color = wvo_type)) +
+  geom_smooth(method = "lm", se = TRUE) +
+  facet_wrap(~ species, ncol = 3) +
+  labs(
+    x = "WVO Score",
+    y = "Danger to Humans",
+    color = "WVO",
+    title = "Danger and WVO"
+  ) +
+  theme_minimal()
+
+ggplot(species_responses_wvo, aes(x = wvo_score, y = destructive_property, color = wvo_type)) +
+  geom_smooth(method = "lm", se = TRUE) +
+  facet_wrap(~ species, ncol = 3) +
+  labs(
+    x = "WVO Score",
+    y = "Destructive to Property",
+    color = "WVO",
+    title = "Destructive to Property and WVO"
+  ) +
+  theme_minimal()
+
+ggplot(species_responses_wvo, aes(x = wvo_score, y = desire_to_see, color = wvo_type)) +
+  geom_smooth(method = "lm", se = TRUE) +
+  facet_wrap(~ species, ncol = 3) +
+  labs(
+    x = "WVO Score",
+    y = "Desire to See",
+    color = "WVO",
+    title = "Desire to See and WVO"
+  ) +
+  theme_minimal()
+
+```
