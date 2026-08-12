@@ -5,23 +5,26 @@ date: "2026-08-06"
 ---
 
 ```{r data, include=FALSE}
-data <- readRDS("C:/Users/ab206027/OneDrive - The University of Montana/Documents/hunting_survey/data/personal_weights.rds")
-species_responses <- readRDS("C:/Users/ab206027/OneDrive - The University of Montana/Documents/hunting_survey/data/species_responses.rds")
-
 library(dplyr)
 library(tidyr)
 library(ggplot2)
 library(patchwork)
+library(here)
+
+data <- readRDS(here("data", "personal_weights.rds"))
+species_responses <- readRDS(here("data", "species_responses.rds"))
+
+
 
 reasons_gender <- data %>%
   select(gender, starts_with("reason_"))
 
-data <- data %>%
-  pivot_longer(
-     cols = c(wvo_mutualism, wvo_domination),
-    names_to = "wvo_type",
-    values_to = "wvo_score"
-  )
+# data <- data %>%
+#   pivot_longer(
+#      cols = c(wvo_mutualism, wvo_domination),
+#     names_to = "wvo_type",
+#     values_to = "wvo_score"
+#   )
 
 ```
 
@@ -115,7 +118,14 @@ ggplot(
 ## WVO? Can we break them?
 Can we use WVOs to predict acceptance of hunting and trapping?
 ```{r WVO, echo=FALSE}
-ggplot(data, aes(x = wvo_score, y = hunting_support, color = wvo_type)) +
+data_wvo <- data %>%
+  pivot_longer(
+    cols = c(wvo_mutualism, wvo_domination),
+    names_to = "wvo_type",
+    values_to = "wvo_score"
+  )
+
+ggplot(data_wvo, aes(x = wvo_score, y = hunting_support, color = wvo_type)) +
   scale_x_continuous(limits = c(0, NA)) +
   scale_y_continuous(limits = c(0, NA)) +
   geom_smooth(method = "lm", se = TRUE) +
@@ -127,7 +137,7 @@ ggplot(data, aes(x = wvo_score, y = hunting_support, color = wvo_type)) +
   ) +
   theme_minimal()
 
-ggplot(data, aes(x = wvo_score, y = trapping_support, color = wvo_type)) +
+ggplot(data_wvo, aes(x = wvo_score, y = trapping_support, color = wvo_type)) +
   scale_x_continuous(limits = c(0, NA)) +
   scale_y_continuous(limits = c(0, NA)) +
   geom_smooth(method = "lm", se = TRUE) +
