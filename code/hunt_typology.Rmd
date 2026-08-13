@@ -232,11 +232,9 @@ centroid_summary <- as.data.frame(final_kmeans$centers) %>%
   rownames_to_column("cluster_num") %>%
   mutate(overall_mean = rowMeans(across(where(is.numeric))))
 
-# Identify endpoints by overall mean
 strongest <- centroid_summary %>% slice_max(overall_mean, n = 1) %>% pull(cluster_num)
 weakest   <- centroid_summary %>% slice_min(overall_mean, n = 1) %>% pull(cluster_num)
 
-# For the middle three, use MR1 centroid score to distinguish
 middle_three <- centroid_summary %>%
   filter(!cluster_num %in% c(strongest, weakest)) %>%
   arrange(desc(MR1))
@@ -244,12 +242,11 @@ middle_three <- centroid_summary %>%
 cluster_lookup <- c(
   setNames("Strong Supporters",      strongest),
   setNames("Strong Opponents",       weakest),
-  setNames("Traditional Supporters", middle_three$cluster_num[1]),  # highest MR1
-  setNames("Opponents, except Food",     middle_three$cluster_num[2]),  # mid MR1
-  setNames("Agnostic",               middle_three$cluster_num[3])   # lowest MR1
+  setNames("Traditional Supporters", middle_three$cluster_num[1]),
+  setNames("Opponents, except Food", middle_three$cluster_num[2]),
+  setNames("Agnostic",               middle_three$cluster_num[3])
 )
 
-# Apply labels
 personal_weights <- personal_weights %>%
   mutate(
     cluster = as.character(cluster),
@@ -262,7 +259,50 @@ personal_weights <- personal_weights %>%
       "Strong Opponents"
     ))
   )
+
+# Attach factor scores to personal_weights
+factor_score_df <- as.data.frame(fa_result$scores) %>%
+  mutate(row_id = pca_rows)
+
+personal_weights <- personal_weights %>%
+  left_join(factor_score_df, by = "row_id")
 ```
+
+```{r cluster factor scatter, echo=F, include=T, fig.height=7, fig.width=9}
+ggplot(personal_weights %>% filter(!is.na(cluster)),
+       aes(x = MR1, y = MR2, color = cluster)) +
+  geom_point(alpha = 0.2, size = 0.8) +
+  stat_ellipse(level = 0.68, linewidth = 0.8) +
+  scale_color_brewer(palette = "Set2") +
+  labs(title = "Cluster Membership in Factor Space",
+       x = "MR1: Traditional Hunting Support",
+       y = "MR2: Extreme Hunting/Trapping Support") +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank()) +
+  guides(color = guide_legend(override.aes = list(alpha = 1, size = 2)))
+```
+
+```{r cluster factor boxplots, echo=F, include=T, fig.height=6, fig.width=10}
+personal_weights %>%
+  filter(!is.na(cluster)) %>%
+  select(cluster, MR1, MR2) %>%
+  pivot_longer(cols = c(MR1, MR2), names_to = "factor", values_to = "score") %>%
+  mutate(factor = recode(factor,
+    MR1 = "Traditional Hunting Support",
+    MR2 = "Extreme Hunting/Trapping Support"
+  )) %>%
+  ggplot(aes(x = cluster, y = score, fill = cluster)) +
+  geom_boxplot(alpha = 0.7, outlier.size = 0.5, outlier.alpha = 0.3) +
+  scale_fill_brewer(palette = "Set2") +
+  facet_wrap(~ factor) +
+  labs(title = "Factor Score Distributions by Cluster",
+       x = NULL, y = "Factor Score") +
+  theme_minimal() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 25, hjust = 1))
+```
+
 
 
 
