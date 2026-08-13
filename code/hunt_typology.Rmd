@@ -1,0 +1,327 @@
+---
+title: "Exploring hunting support 'clusters'"
+author: "Alex Metcalf"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: journal
+    toc: true
+    toc_float: true
+---
+
+```{r load data, echo=F, warning=T, message=T}
+library(here)
+library(tidyverse)
+library(ggrepel)
+library(psych)
+library(factoextra)
+
+personal_weights <- readRDS(here("data", "personal_weights.rds"))
+```
+First I just pulled in the data and set the variables to use in the PCA and cluster analysis.
+```{r pca setup, echo=T, warning=T, message=T}
+pca_vars <- c(
+  "reason_food", "reason_recreation", "reason_population_control",
+  "reason_trophy", "reason_reduce_conflict", "reason_conservation_revenue",
+  "reason_indigenous_practice", "reason_cultural_tradition",
+  "method_baiting", "method_captive_hunt", "method_trapping",
+  "method_neck_snares", "method_dogs_predators", "method_dogs_birds",
+  "method_aerial", "method_bow", "method_firearms"
+)
+
+pca_data <- personal_weights %>%
+  select(all_of(pca_vars)) %>%
+  drop_na()
+```
+
+Then I generated a scree plot to see how many factors make sense.
+```{r scree plot, echo=F, include=T}
+pca_result <- prcomp(pca_data, scale. = TRUE)
+
+eigenvalues <- pca_result$sdev^2
+scree_df <- tibble(
+  component = 1:length(eigenvalues),
+  eigenvalue = eigenvalues
+)
+
+ggplot(scree_df, aes(x = component, y = eigenvalue)) +
+  geom_line(color = "gray40") +
+  geom_point(size = 3, color = "gray40") +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red", linewidth = 0.7) +
+  geom_text_repel(aes(label = round(eigenvalue, 2)), size = 3, color = "gray20") +
+  scale_x_continuous(breaks = 1:length(eigenvalues)) +
+  labs(
+    title = "Scree Plot",
+    subtitle = "Dashed line = eigenvalue of 1 (Kaiser criterion)",
+    x = "Component",
+    y = "Eigenvalue"
+  ) +
+  theme_minimal()
+```
+
+Components with eigenvalues >1 are generally unique; but that's a rule of thumb, so I included 3 components in subsequent analysis since #3 had an eigenvalue of 0.94.
+
+```{r varimax rotation, echo=F, warning=F, message=F}
+fa_result <- fa(pca_data, nfactors = 2, rotate = "varimax", fm = "pc")
+
+loadings_df <- fa_result$loadings %>%
+  unclass() %>%
+  as.data.frame() %>%
+  rownames_to_column("variable") %>%
+  pivot_longer(cols = starts_with("MR"), names_to = "factor", values_to = "loading") %>%
+  mutate(
+    variable = recode(variable,
+      reason_food                  = "Food",
+      reason_recreation            = "Recreation",
+      reason_population_control    = "Pop. Control",
+      reason_trophy                = "Trophy",
+      reason_reduce_conflict       = "Reduce Conflict",
+      reason_conservation_revenue  = "Conservation Revenue",
+      reason_indigenous_practice   = "Indigenous",
+      reason_cultural_tradition    = "Culture/Tradition",
+      method_baiting               = "Baiting",
+      method_captive_hunt          = "Captive Hunt",
+      method_trapping              = "Trapping",
+      method_neck_snares           = "Snares",
+      method_dogs_predators        = "Hounds",
+      method_dogs_birds            = "Bird Dogs",
+      method_aerial                = "Aerial",
+      method_bow                   = "Bow",
+      method_firearms              = "Firearms"
+    )
+  )
+```
+
+```{r loadings heatmap, echo=F, include=T}
+ggplot(loadings_df, aes(x = factor, y = variable, fill = loading)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = round(loading, 2)), size = 3) +
+  scale_fill_gradient2(low = "steelblue", mid = "white", high = "darkorange",
+                       midpoint = 0, limits = c(-1, 1), name = "Loading") +
+  labs(
+    title = "Varimax-Rotated Factor Loadings",
+    x = "Factor", y = NULL
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(hjust = 1))
+```
+
+I interpret the resulting factor loadings like this...open to feedback!:
+MR1 = "Traditional hunting support" (firearms, population control, bow, bird dogs, food, culture)
+MR2 = "Extreme hunting/trapping support" (trophy, trapping, snares, captive, drones!)
+
+[There was that 3rd factor, but all variables loading on that factor loaded on one of the other factors more strongly so I got rid of it)
+
+```{r hierarchical clustering, echo=F, include=T, fig.height=7, fig.width=10}
+# Extract factor scores
+factor_scores <- as.data.frame(fa_result$scores)
+
+# Scale the factor scores
+scores_scaled <- scale(factor_scores)
+# 
+# # Hierarchical clustering with Ward's method
+# set.seed(42)
+# sample_idx <- sample(nrow(scores_scaled), 1500)
+# dist_matrix <- dist(scores_scaled[sample_idx, ], method = "euclidean")
+# hclust_result <- hclust(dist_matrix, method = "ward.D2")
+# 
+# # Dendrogram
+# fviz_dend(hclust_result,
+#           k = 5,                        # placeholder — adjust after inspection
+#           cex = 0.5,
+#           palette = "jco",
+#           rect = TRUE,
+#           rect_fill = TRUE,
+#           main = "Hierarchical Clustering Dendrogram (Ward's Method)",
+#           xlab = "",
+#           ylab = "Height")
+```
+Using these factors, I ran a hierarchical cluster analysis to see how many clusters might make sense and where the big "gains" are in adding more clusters and where those gains run out.
+
+Based on this hierarchical cluster analysis and resulting dendrogram, it looks like we're in the 5 or 6 cluster space. 3 or 4 could work but they're probably boring. Let's look at how solutions 3-6 would look across all our original variables. (NOTE: I've commented this out of the RMD because it takes too long to run)
+```{r kmeans comparison, echo=F, include=T, fig.height=8, fig.width=10, warning=F, message=F}
+set.seed(42)
+
+# Run k-means for k = 2 through 7
+kmeans_list <- map(3:6, ~ kmeans(scores_scaled, centers = .x, nstart = 25, iter.max = 100))
+names(kmeans_list) <- paste0("k", 3:6)
+
+# Merge factor scores with raw variables for profiling
+profile_data <- personal_weights %>%
+  select(all_of(pca_vars)) %>%
+  drop_na() %>%
+  bind_cols(factor_scores) %>%
+  mutate(across(all_of(pca_vars), scale))  # scale for comparable heatmap values
+
+# Generate a profile heatmap for each k
+profile_plots <- imap(kmeans_list, function(km, name) {
+  k <- km$centers %>% nrow()
+  
+  profile_data %>%
+    mutate(cluster = factor(km$cluster)) %>%
+    group_by(cluster) %>%
+    summarize(across(all_of(pca_vars), mean), .groups = "drop") %>%
+    pivot_longer(cols = all_of(pca_vars), names_to = "variable", values_to = "mean_z") %>%
+    mutate(variable = recode(variable,
+      reason_food                  = "Food",
+      reason_recreation            = "Recreation",
+      reason_population_control    = "Pop. Control",
+      reason_trophy                = "Trophy",
+      reason_reduce_conflict       = "Reduce Conflict",
+      reason_conservation_revenue  = "Conservation Revenue",
+      reason_indigenous_practice   = "Indigenous",
+      reason_cultural_tradition    = "Culture/Tradition",
+      method_baiting               = "Baiting",
+      method_captive_hunt          = "Captive Hunt",
+      method_trapping              = "Trapping",
+      method_neck_snares           = "Snares",
+      method_dogs_predators        = "Hounds",
+      method_dogs_birds            = "Bird Dogs",
+      method_aerial                = "Aerial",
+      method_bow                   = "Bow",
+      method_firearms              = "Firearms"
+    )) %>%
+    ggplot(aes(x = cluster, y = variable, fill = mean_z)) +
+    geom_tile(color = "white") +
+    geom_text(aes(label = round(mean_z, 2)), size = 2.5) +
+    scale_fill_gradient2(low = "steelblue", mid = "white", high = "darkorange",
+                         midpoint = 0, name = "Mean Z") +
+    labs(title = paste0("k = ", k, " cluster profiles"),
+         x = "Cluster", y = NULL) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(hjust = 1),
+          legend.position = "bottom")
+})
+
+# Print all plots
+walk(profile_plots, print)
+```
+
+There is a challenge here that comes from the weighting. The k-means cluster centers here are not weighted so they're the bit misleading. So we'll wait to name and describe these clusters, but it looks like 5 is the right number to be (but this is totally subjective). My rationale is that the dendrogram has big leaps at the 5 cluster solution, but more importantly there seems to be meaningful splits happening between clusters up to the 5 cluster solution, but not after.
+
+I'm going with 5 cluster solution.
+
+I'm using the means shown in the heatmap BELOW (not above) to name the clusters because those means are weighted whereas the k-means is not - it looks like we have:
+
+**1. Strong Supporters (14%)** — High acceptability across virtually all hunting reasons and methods, both traditional and more extreme. The most pro-hunting segment.
+**2. Opponents except food (23%)** — Generally opposed to hunting, but notable exceptions for food, population control, and indigenous culture.
+**3. Agnostic (22%)** — Consistently middle-of-the-road across nearly all variables. Neither strongly accepting nor rejecting — possibly disengaged or genuinely indifferent to hunting as an issue.
+**4. Traditional Supporters (25%)** — Strong support for conventional hunting reasons and methods (e.g., food, population control, firearms, bow, bird dogs, conservation) but lukewarm or negative on more extreme methods and reasons (e.g., trophy, trapping, snares, captive, drones). The "mainstream hunter" segment.
+**5. Strong Opponents (16%)** — Low acceptability across the board. Reject both the reasons for and methods of hunting broadly.
+
+```{r finalize kmeans, echo=F, warning=F, message=F}
+set.seed(42)
+final_kmeans <- kmeans(scores_scaled, centers = 5, nstart = 25, iter.max = 100)
+
+# Merge cluster assignments back into personal_weights
+personal_weights <- personal_weights %>%
+  mutate(row_id = row_number())
+
+pca_rows <- personal_weights %>%
+  select(all_of(pca_vars), row_id) %>%
+  drop_na() %>%
+  pull(row_id)
+
+personal_weights <- personal_weights %>%
+  mutate(cluster = NA_integer_)
+
+personal_weights$cluster[pca_rows] <- final_kmeans$cluster
+
+# Programmatically assign names based on centroid profiles
+centroid_summary <- as.data.frame(final_kmeans$centers) %>%
+  rownames_to_column("cluster_num") %>%
+  mutate(overall_mean = rowMeans(across(where(is.numeric))))
+
+# Identify endpoints by overall mean
+strongest <- centroid_summary %>% slice_max(overall_mean, n = 1) %>% pull(cluster_num)
+weakest   <- centroid_summary %>% slice_min(overall_mean, n = 1) %>% pull(cluster_num)
+
+# For the middle three, use MR1 centroid score to distinguish
+middle_three <- centroid_summary %>%
+  filter(!cluster_num %in% c(strongest, weakest)) %>%
+  arrange(desc(MR1))
+
+cluster_lookup <- c(
+  setNames("Strong Supporters",      strongest),
+  setNames("Strong Opponents",       weakest),
+  setNames("Traditional Supporters", middle_three$cluster_num[1]),  # highest MR1
+  setNames("Opponents, except Food",     middle_three$cluster_num[2]),  # mid MR1
+  setNames("Agnostic",               middle_three$cluster_num[3])   # lowest MR1
+)
+
+# Apply labels
+personal_weights <- personal_weights %>%
+  mutate(
+    cluster = as.character(cluster),
+    cluster = cluster_lookup[cluster],
+    cluster = factor(cluster, levels = c(
+      "Strong Supporters",
+      "Traditional Supporters",
+      "Opponents, except Food",
+      "Agnostic",
+      "Strong Opponents"
+    ))
+  )
+```
+
+
+
+
+```{r cluster population estimates, echo=F, include=T}
+cluster_pct <- personal_weights %>%
+  filter(!is.na(cluster)) %>%
+  group_by(cluster) %>%
+  summarize(weighted_n = sum(weight, na.rm = TRUE), .groups = "drop") %>%
+  mutate(pct = weighted_n / sum(weighted_n) * 100)
+
+ggplot(cluster_pct, aes(x = cluster, y = pct, fill = cluster)) +
+  geom_col(width = 0.6) +
+  geom_text(aes(label = paste0(round(pct, 1), "%")), vjust = -0.5, size = 3.5) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "Weighted Population Share by Cluster",
+       x = NULL, y = "% of Population") +
+  theme_minimal() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 25, hjust = 1))
+```
+
+```{r cluster profiles, echo=F, include=T, fig.height=7, fig.width=10}
+profile_data <- personal_weights %>%
+  filter(!is.na(cluster)) %>%
+  select(all_of(pca_vars), cluster, weight) %>%
+  pivot_longer(cols = all_of(pca_vars), names_to = "variable", values_to = "value") %>%
+  mutate(variable = recode(variable,
+    reason_food                  = "Food",
+    reason_recreation            = "Recreation",
+    reason_population_control    = "Pop. Control",
+    reason_trophy                = "Trophy",
+    reason_reduce_conflict       = "Reduce Conflict",
+    reason_conservation_revenue  = "Conservation Revenue",
+    reason_indigenous_practice   = "Indigenous",
+    reason_cultural_tradition    = "Culture/Tradition",
+    method_baiting               = "Baiting",
+    method_captive_hunt          = "Captive Hunt",
+    method_trapping              = "Trapping",
+    method_neck_snares           = "Snares",
+    method_dogs_predators        = "Hounds",
+    method_dogs_birds            = "Bird Dogs",
+    method_aerial                = "Aerial",
+    method_bow                   = "Bow",
+    method_firearms              = "Firearms"
+  )) %>%
+  group_by(cluster, variable) %>%
+  summarize(mean = weighted.mean(value, weight, na.rm = TRUE), .groups = "drop")
+
+ggplot(profile_data, aes(x = cluster, y = variable, fill = mean)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = round(mean, 2)), size = 3) +
+  scale_fill_gradient2(low = "steelblue", mid = "white", high = "darkorange",
+                       midpoint = 3, limits = c(1, 5), name = "Mean (1-5)") +
+  labs(title = "Cluster Profiles: Mean Acceptability by Variable",
+       x = NULL, y = NULL) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 25, hjust = 1))
+```
+
+
+
