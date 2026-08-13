@@ -323,5 +323,67 @@ ggplot(profile_data, aes(x = cluster, y = variable, fill = mean)) +
   theme(axis.text.x = element_text(angle = 25, hjust = 1))
 ```
 
+Support for hunting and trapping by cluster:
+
+```{r cluster support, echo=F, include=T, fig.height=6, fig.width=10}
+support_by_cluster <- personal_weights %>%
+  filter(!is.na(cluster)) %>%
+  select(cluster, hunting_support, trapping_support, weight) %>%
+  pivot_longer(cols = c(hunting_support, trapping_support),
+               names_to = "support_type",
+               values_to = "support_value") %>%
+  mutate(support_type = factor(support_type,
+                                levels = c("hunting_support", "trapping_support"),
+                                labels = c("Hunting", "Trapping"))) %>%
+  group_by(cluster, support_type) %>%
+  summarize(
+    mean = weighted.mean(support_value, weight, na.rm = TRUE),
+    pct_support = sum(weight[support_value >= 4], na.rm = TRUE) / sum(weight, na.rm = TRUE) * 100,
+    .groups = "drop"
+  )
+
+ggplot(support_by_cluster, aes(x = cluster, y = pct_support, fill = support_type)) +
+  geom_col(position = "dodge", width = 0.6) +
+  geom_text(aes(label = paste0(round(pct_support, 1), "%")),
+            position = position_dodge(width = 0.6),
+            vjust = -0.5, size = 3) +
+  scale_fill_manual(values = c("Hunting" = "orange", "Trapping" = "forestgreen")) +
+  labs(title = "% Supporting or Strongly Supporting Hunting and Trapping by Cluster",
+       x = NULL, y = "% Support/Strongly Support") +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        axis.text.x = element_text(angle = 25, hjust = 1))
+```
+```{r cluster support means, echo=F, include=T, fig.height=6, fig.width=10}
+support_means_cluster <- personal_weights %>%
+  filter(!is.na(cluster)) %>%
+  select(cluster, hunting_support, trapping_support, weight) %>%
+  pivot_longer(cols = c(hunting_support, trapping_support),
+               names_to = "support_type",
+               values_to = "support_value") %>%
+  mutate(support_type = factor(support_type,
+                                levels = c("hunting_support", "trapping_support"),
+                                labels = c("Hunting", "Trapping"))) %>%
+  group_by(cluster, support_type) %>%
+  summarize(
+    mean = weighted.mean(support_value, weight, na.rm = TRUE),
+    se = sqrt(Hmisc::wtd.var(support_value, weight, na.rm = TRUE) / n()),
+    .groups = "drop"
+  )
+
+ggplot(support_means_cluster, aes(x = cluster, y = mean, color = support_type,
+                                   ymin = mean - 1.96*se, ymax = mean + 1.96*se)) +
+  geom_point(size = 3, position = position_dodge(width = 0.4)) +
+  geom_errorbar(width = 0.2, position = position_dodge(width = 0.4)) +
+  scale_color_manual(values = c("Hunting" = "orange", "Trapping" = "forestgreen")) +
+  scale_y_continuous(limits = c(1, 5)) +
+  labs(title = "Mean Hunting and Trapping Support by Cluster",
+       x = NULL, y = "Mean Support (1-5)") +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        axis.text.x = element_text(angle = 25, hjust = 1))
+```
 
 
