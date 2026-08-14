@@ -41,7 +41,8 @@ pca_data <- personal_weights %>%
   drop_na()
 ```
 
-# Principal Component Analysis (PCA)
+# Analysis
+## Principal Component Analysis (PCA)
 
 The first step in our analysis is the PCA which helps us determine the most parsimonious number of multivariate measures we could use to explain variation in our data. Here our data are the acceptability of different hunting reasons and methods.
 
@@ -129,9 +130,9 @@ MR2 = "Extreme hunting/trapping support" (i.e., trophy, trapping, snares, captiv
 
 [Again note: There was that 3rd factor, but all variables loading on that factor loaded on one of the other factors more strongly so I got rid of it)
 
-# Creating a Typology
+## Cluster Analysis
 
-## Determining the number of clusters
+### Determining the number of clusters
 
 Using the factors from the PCA, I ran a hierarchical cluster analysis to see how many clusters might make sense and where the big "gains" are in adding more clusters and where those gains run out. In other words, there are natural groupings of observations in our data, but we get to choose how many groupings we look for. The data can give us some clues based on how 'distant' different observations are and how clumpy they are across our factors. Sometimes there's only 1 group no matter how you slice and dice. Often there are a handful of groups, but exactly the right number can vary based on exactly how observations fall relative to one another. Hierarchical cluster analysis shows all the possible groupings based on all the factors and helps you see natural breaks in the data, how much separation there is between observations, and whether splitting into more groups actually helps differentiate people or not.
 
@@ -248,7 +249,9 @@ I'm going with 5 cluster solution.
 
 I'm using the means shown in the heatmap BELOW (not above) to name the clusters because those are means (not z-scores) and are weighted whereas the k-means z-scores are not.
 
-## The Typology of Hunting Support/Opposition
+# Results
+
+## The Typology
 
 Based on this analysis above, there appear to be 5 unique types of people based on their support or opposition to hunting reasons and methods. They are:
 
@@ -599,5 +602,9 @@ summary_table <- personal_weights %>%
     .groups = "drop"
   )
 
-kable(summary_table, caption = "Key Demographic Characteristics by Cluster")
+summary_table %>%
+  column_to_rownames("cluster") %>%
+  t() %>%
+  as.data.frame() %>%
+  kable(caption = "Key Demographic Characteristics by Cluster")
 ```
