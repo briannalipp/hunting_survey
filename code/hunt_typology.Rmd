@@ -9,16 +9,23 @@ output:
     toc_float: true
 ---
 
+# Introduction
+
+This document presents a chain of analyses that I used to identify specific "clusters" or groups of people based on their support or opposition to hunting. The idea here is that across a range of variables in the survey, people may fall into a generalized 'typology' of support/opposition. For example, there may be people who oppose hunting no matter the reason or methods used, but there may be others who support some reasons or methods of hunting but not others, and there is likely a group who support hunting no matter what. This analysis will use a multivariate approach (i.e., Principal Component Analysis [PCA], also called Factor Analysis) to determine underlying dimensions of hunting support and opposition and then group people into a typology using Cluster Analysis. Finally, I'll estimate the propotions of the US population that fall into each "type" of supporter/opponent and describe the demographics of each type.
+
+First, I loaded necessary library's and pulled in the data from the data cleaning process (i.e., "personal_weights.rds") to begin the analysis.
+
 ```{r load data, echo=F, warning=T, message=T}
 library(here)
 library(tidyverse)
 library(ggrepel)
 library(psych)
 library(factoextra)
+library(knitr)
 
 personal_weights <- readRDS(here("data", "personal_weights.rds"))
 ```
-First I just pulled in the data and set the variables to use in the PCA and cluster analysis.
+Next, I set the variables I intended to use in the PCA and Cluster Analysis.
 ```{r pca setup, echo=T, warning=T, message=T}
 pca_vars <- c(
   "reason_food", "reason_recreation", "reason_population_control",
@@ -34,7 +41,13 @@ pca_data <- personal_weights %>%
   drop_na()
 ```
 
-Then I generated a scree plot to see how many factors make sense.
+# Principal Component Analysis (PCA)
+
+The first step in our analysis is the PCA which helps us determine the most parsimonious number of multivariate measures we could use to explain variation in our data. Here our data are the acceptability of different hunting reasons and methods.
+
+Scree plots are a way to visualize the PCA output - this one below uses an orthogonal rotation to determine the fewest number of underlying factors (sometimes called dimensions, or the 'components' part of PCA) across a range of survey variables. For example, lets say we asked about 12 different methods of hunting; there may be 12 different dimensions where support varies uniquely by each reason, but more likely, there are methods that group together (e.g., all trapping methods and all hunting methods). PCA analyzes the covariance across all variables to find what dimension through this multivariate dataspace explains the most possible variation - that becomes component (or factor) 1. Then, PCA finds the second dimension through the dataspace that explains the second most variation while avoiding any overlap with the first dimension - this becomes component (or factor) 2. PCA does this iteratively until it expalins all the variation. However, as you can imagine, the variation explained is high for component 1, less for component 2, and so on - at some point new components/factors don't add much to our understanding. This "cutoff" is somewhat arbitrary, but we use a statistic called an eigenvalue from the PCA analysis to make this determination. Generally components/factors with eigenvalues over 1.0 are useful.
+
+The following scree plot shows all the components and their eigenvalues, with an indication of the 1.0 cutoff.
 ```{r scree plot, echo=F, include=T}
 pca_result <- prcomp(pca_data, scale. = TRUE)
 
@@ -59,7 +72,9 @@ ggplot(scree_df, aes(x = component, y = eigenvalue)) +
   theme_minimal()
 ```
 
-Components with eigenvalues >1 are generally unique; but that's a rule of thumb, so I included 3 components in subsequent analysis since #3 had an eigenvalue of 0.94.
+Components with eigenvalues >1 are generally unique; but that's a rule of thumb, so I included 3 components in subsequent analysis since #3 had an eigenvalue of 0.94, close to the 1.0 cutoff. (Note, I backtracked and only used 2 components because 3 wasn't that different after all).
+
+The following heatmap shows the two components identified through the PCA (i.e., MR1 and MR2) and the "loading" scores of each survey variable onto those components. For example, since a component exists in the multivariate space defined by all these variables, each variable helps define that component differently; some maybe nearly parallel and will load heavily (near 1.0), whereas others may be close to perpendicular and not load at all (near 0.0). The components are defined by the variables that load heavily onto each. 
 
 ```{r varimax rotation, echo=F, warning=F, message=F}
 fa_result <- fa(pca_data, nfactors = 2, rotate = "varimax", fm = "pc")
@@ -107,10 +122,28 @@ ggplot(loadings_df, aes(x = factor, y = variable, fill = loading)) +
 ```
 
 I interpret the resulting factor loadings like this...open to feedback!:
-MR1 = "Traditional hunting support" (firearms, population control, bow, bird dogs, food, culture)
-MR2 = "Extreme hunting/trapping support" (trophy, trapping, snares, captive, drones!)
 
-[There was that 3rd factor, but all variables loading on that factor loaded on one of the other factors more strongly so I got rid of it)
+MR1 = "Traditional hunting support" (i.e., firearms, population control, bow, bird dogs, food, and culture load onto this factor)
+
+MR2 = "Extreme hunting/trapping support" (i.e., trophy, trapping, snares, captive, and drones load onto this factor)
+
+[Again note: There was that 3rd factor, but all variables loading on that factor loaded on one of the other factors more strongly so I got rid of it)
+
+# Creating a Typology
+
+## Determining the number of clusters
+
+Using the factors from the PCA, I ran a hierarchical cluster analysis to see how many clusters might make sense and where the big "gains" are in adding more clusters and where those gains run out. In other words, there are natural groupings of observations in our data, but we get to choose how many groupings we look for. The data can give us some clues based on how 'distant' different observations are and how clumpy they are across our factors. Sometimes there's only 1 group no matter how you slice and dice. Often there are a handful of groups, but exactly the right number can vary based on exactly how observations fall relative to one another. Hierarchical cluster analysis shows all the possible groupings based on all the factors and helps you see natural breaks in the data, how much separation there is between observations, and whether splitting into more groups actually helps differentiate people or not.
+
+(NOTE: I've commented this code out of the RMD because it takes too long to run, but I'm including the dendrogram manually.) The way to interpret this figure is to imagine every survey recipient lined up on the x-axis. Now look at the top of the figure - with everyone in one big cluster. Based on the differences between all our survey respondents, we move down and make 1 split, creating two clusters - if you followed this 1 split down to the x-axis, you will see which respondents are in cluster 1 vs 2. Now, we can make another split, creating 3 cluster and see who is in those. Then, it gets a bit messier because there's no real clean place to split our respondents into 4 groups; if we say one difference matters (one of the branches splitting), then another difference is equally meaningful (one of the other branches splits). So, 4 seems like a poor number. Another helpful part of this figure is the vertical distance between splits - the longer the vertical split, the more meaningful that division is. So, 5 seems like a very clear split in the data that really differentiates our groups. I've colored the figure based on a 5 cluster solution. But you could go to a 6 cluster solution and the "gray" cluster would split it two; the question is does this split add meaningful differentiation between these respondents, or is it too in the weeds.
+
+
+```{r dendrogram, echo=F}
+knitr::include_graphics(here("figs", "dendrogram.png"))
+```
+
+Based on this hierarchical cluster analysis and resulting dendrogram, it looks like we're in the 5 or 6 cluster space. 3 or 4 could work but they're probably boring. To help us make a final determination, let's look at how solutions 3-6 would look across all our original survey variables.
+
 
 ```{r hierarchical clustering, echo=F, include=T, fig.height=7, fig.width=10}
 # Extract factor scores
@@ -118,16 +151,15 @@ factor_scores <- as.data.frame(fa_result$scores)
 
 # Scale the factor scores
 scores_scaled <- scale(factor_scores)
-# 
+
 # # Hierarchical clustering with Ward's method
 # set.seed(42)
-# sample_idx <- sample(nrow(scores_scaled), 1500)
-# dist_matrix <- dist(scores_scaled[sample_idx, ], method = "euclidean")
+# dist_matrix <- dist(scores_scaled, method = "euclidean")
 # hclust_result <- hclust(dist_matrix, method = "ward.D2")
 # 
 # # Dendrogram
 # fviz_dend(hclust_result,
-#           k = 5,                        # placeholder — adjust after inspection
+#           k = 5,
 #           cex = 0.5,
 #           palette = "jco",
 #           rect = TRUE,
@@ -135,10 +167,23 @@ scores_scaled <- scale(factor_scores)
 #           main = "Hierarchical Clustering Dendrogram (Ward's Method)",
 #           xlab = "",
 #           ylab = "Height")
+# 
+# # Save
+# png(here("figs", "dendrogram.png"), width = 10, height = 7, units = "in", res = 300)
+# fviz_dend(hclust_result,
+#           k = 5,
+#           cex = 0.5,
+#           palette = "jco",
+#           rect = TRUE,
+#           rect_fill = TRUE,
+#           main = "Hierarchical Clustering Dendrogram (Ward's Method)",
+#           xlab = "",
+#           ylab = "Height")
+# dev.off()
 ```
-Using these factors, I ran a hierarchical cluster analysis to see how many clusters might make sense and where the big "gains" are in adding more clusters and where those gains run out.
 
-Based on this hierarchical cluster analysis and resulting dendrogram, it looks like we're in the 5 or 6 cluster space. 3 or 4 could work but they're probably boring. Let's look at how solutions 3-6 would look across all our original variables. (NOTE: I've commented this out of the RMD because it takes too long to run)
+The following heatmaps show how each cluster is described by each variable from the survey, given a 3 cluster solution, a 4 cluster solution, and so on up to 6 cluster solutions. This is a diagnostic step for seeing where more clusters add value in explaining differentiation among people, and where we start splitting hairs and not gaining much value for the added complexity. The heatmaps show each variables z-score at the 'center' of each cluster; 0 meaning a cluster's mean on that variable is exactly the mean for the entire sample, a negative value means that cluster is lower, a positive value means that cluster is higher. Magnitude tells you how many standard deviations that cluster is away from the sample mean - so a 1.5 means that cluster is 1.5 standard deviations above average on that variable, which would be quite different.
+
 ```{r kmeans comparison, echo=F, include=T, fig.height=8, fig.width=10, warning=F, message=F}
 set.seed(42)
 
@@ -197,17 +242,27 @@ profile_plots <- imap(kmeans_list, function(km, name) {
 walk(profile_plots, print)
 ```
 
-There is a challenge here that comes from the weighting. The k-means cluster centers here are not weighted so they're the bit misleading. So we'll wait to name and describe these clusters, but it looks like 5 is the right number to be (but this is totally subjective). My rationale is that the dendrogram has big leaps at the 5 cluster solution, but more importantly there seems to be meaningful splits happening between clusters up to the 5 cluster solution, but not after.
+There is a challenge interpreting these heatmaps that arises due to the weighting and the shift from z-scores to actual variable means. The k-means cluster centers here are z-scores (not 1-5 scores) and they are not weighted so they're the bit misleading. So our next step is to name and describe these clusters, but we'll use the 1-5 score means to do that. Regardless, it looks like the 5 cluster solution is the right number (but this is subjective). My rationale is that the dendrogram has big leaps at the 5 cluster solution, but more importantly there seems to be meaningful splits happening between clusters up to the 5 cluster solution, but not after. In other words, the 6 cluster solution splits one of the 5 clusters into two groups who wouldn't be that substantively different (two agnostic groups, one slight more supportive, one slightly more opposed). Again, there's no way around the subjectivity in this decision.
 
 I'm going with 5 cluster solution.
 
-I'm using the means shown in the heatmap BELOW (not above) to name the clusters because those means are weighted whereas the k-means is not - it looks like we have:
+I'm using the means shown in the heatmap BELOW (not above) to name the clusters because those are means (not z-scores) and are weighted whereas the k-means z-scores are not.
+
+## The Typology of Hunting Support/Opposition
+
+Based on this analysis above, there appear to be 5 unique types of people based on their support or opposition to hunting reasons and methods. They are:
 
 **1. Strong Supporters (14%)** — High acceptability across virtually all hunting reasons and methods, both traditional and more extreme. The most pro-hunting segment.
+
 **2. Opponents except food (23%)** — Generally opposed to hunting, but notable exceptions for food, population control, and indigenous culture.
+
 **3. Agnostic (22%)** — Consistently middle-of-the-road across nearly all variables. Neither strongly accepting nor rejecting — possibly disengaged or genuinely indifferent to hunting as an issue.
+
 **4. Traditional Supporters (25%)** — Strong support for conventional hunting reasons and methods (e.g., food, population control, firearms, bow, bird dogs, conservation) but lukewarm or negative on more extreme methods and reasons (e.g., trophy, trapping, snares, captive, drones). The "mainstream hunter" segment.
+
 **5. Strong Opponents (16%)** — Low acceptability across the board. Reject both the reasons for and methods of hunting broadly.
+
+We can show how these clusters group observations (i.e., survey respondents), mapping into the the multivariate space defined by the PCA components:
 
 ```{r finalize kmeans, echo=F, warning=F, message=F}
 set.seed(42)
@@ -283,6 +338,8 @@ ggplot(personal_weights %>% filter(!is.na(cluster)),
   guides(color = guide_legend(override.aes = list(alpha = 1, size = 2)))
 ```
 
+Another way to look at this is to see the means and variations of factor scores (those two PCA components) for each cluster:
+
 ```{r cluster factor boxplots, echo=F, include=T, fig.height=6, fig.width=10}
 personal_weights %>%
   filter(!is.na(cluster)) %>%
@@ -303,7 +360,7 @@ personal_weights %>%
         axis.text.x = element_text(angle = 25, hjust = 1))
 ```
 
-
+Here is the proportion (weighted for inference) of each cluster in the US Population:
 
 
 
@@ -325,6 +382,7 @@ ggplot(cluster_pct, aes(x = cluster, y = pct, fill = cluster)) +
         axis.text.x = element_text(angle = 25, hjust = 1))
 ```
 
+Here are the final variable MEAN scores for each cluster:
 ```{r cluster profiles, echo=F, include=T, fig.height=7, fig.width=10}
 profile_data <- personal_weights %>%
   filter(!is.na(cluster)) %>%
@@ -363,7 +421,7 @@ ggplot(profile_data, aes(x = cluster, y = variable, fill = mean)) +
   theme(axis.text.x = element_text(angle = 25, hjust = 1))
 ```
 
-Support for hunting and trapping by cluster:
+Support for hunting and trapping varies considerably by cluster. The bar graph below shows the percent of each cluster membership who support or strongly support hunting and trapping overall. The points and error bars on the following figure shows the mean and standard error for hunting (orange) and trapping (green) support/opposition within each cluster.
 
 ```{r cluster support, echo=F, include=T, fig.height=6, fig.width=10}
 support_by_cluster <- personal_weights %>%
@@ -426,4 +484,120 @@ ggplot(support_means_cluster, aes(x = cluster, y = mean, color = support_type,
         axis.text.x = element_text(angle = 25, hjust = 1))
 ```
 
+## Describing each Type
 
+**Strong Supporters** are the most pro-hunting segment and skew notably male (63%), conservative (mean ideology 42.3 on a 0-100 scale where 0 is most conservative), and have high rates of both personal hunting experience (33%) and game meat consumption (70%). They score the highest on WVO Domination (5.3 out of 7) and moderate on Mutualism (3.9), reflecting a worldview where humans have a right to use wildlife resources. Christian Nationalism scores are the highest of any cluster (3.41 out of 5), and nearly all eat meat generally (98%). Despite their strong pro-hunting attitudes, 80% live in metropolitan areas — a product of this being a poor metric more than anything else I assume.
+
+**Traditional Supporters** look demographically similar to Strong Supporters — majority male (61%), conservative (44.4), high game meat consumption (63%) and general meat eating (98%) — but are somewhat more educated (41%) and slightly more moderate politically. They are the most likely of any cluster to know a hunter (53%) without necessarily hunting themselves (24%), suggesting this group includes a lot of hunting-adjacent people: families with hunting in their background, outdoor recreationists, and people culturally connected to hunting even if not currently active. Their WVO scores are similar to Strong Supporters, reflecting a generally utilitarian but not extreme orientation toward wildlife.
+
+**Opponents, except Food** are broadly opposed to hunting but accept it under narrow utilitarian circumstances — particularly for food, population control, and indigenous practice. They are majority female (60%), well-educated (44%), politically liberal (59.3), and have very low rates of personal hunting experience (5%) and game meat consumption (32%). Their high Mutualism score (4.9) and low Domination score (3.5) suggest they value wildlife intrinsically but can rationalize hunting when it serves a clear subsistence or cultural purpose. Christian Nationalism scores are among the lowest of any cluster (2.75).
+
+**Agnostic** respondents are the hardest to characterize — which makes sense given their middle-of-the-road attitudes across nearly all variables. They are majority female (57%), the least educated of any cluster (29%), and politically moderate-to-liberal (52.4). They have low rates of personal hunting experience (6%) and game meat consumption (35%), and their WVO scores are middling across the board. This group may simply be disengaged from the issue of hunting altogether — neither invested enough to support it nor opposed enough to reject it.
+
+**Strong Opponents** are the most distinctly anti-hunting segment and are demographically the most liberal (61.0), most female (68%), most urban (94%), and least likely to eat game meat (11%), know a hunter (20%), or have hunted themselves (less than 1%) of any cluster. Their WVO profile — highest Mutualism (5.3) and lowest Domination (3.3) out of 7 — reflects a strongly wildlife-rights-oriented worldview where animals are seen as inherently valuable and not resources for human use. Christian Nationalism scores are among the lowest (2.77), and only 16% voted for Trump, making this the most politically distinct cluster in the dataset.
+
+```{r cluster demographics continuous, echo=F, include=T, fig.height=10, fig.width=10, warning=F, message=F}
+demo_vars_continuous <- c(
+  "political_ideology", "hunter_status", "interested_in_hunting",
+  "wvo_mutualism", "wvo_domination", "christian_nationalism_score"
+)
+
+personal_weights <- personal_weights %>%
+  mutate(across(all_of(demo_vars_continuous), as.numeric))
+
+demo_continuous_long <- personal_weights %>%
+  filter(!is.na(cluster)) %>%
+  select(all_of(demo_vars_continuous), cluster, weight) %>%
+  pivot_longer(cols = all_of(demo_vars_continuous),
+               names_to = "variable", values_to = "value") %>%
+  mutate(variable = recode(variable,
+    political_ideology         = "Political Ideology",
+    hunter_status              = "Hunter Status",
+    interested_in_hunting      = "Interest in Hunting",
+    wvo_mutualism              = "WVO Mutualism",
+    wvo_domination             = "WVO Domination",
+    christian_nationalism_score = "Christian Nationalism"
+  )) %>%
+  group_by(cluster, variable) %>%
+  summarize(
+    mean = weighted.mean(value, weight, na.rm = TRUE),
+    se   = sqrt(Hmisc::wtd.var(value, weight, na.rm = TRUE) / n()),
+    .groups = "drop"
+  )
+
+ggplot(demo_continuous_long, aes(x = cluster, y = mean, color = cluster,
+                                  ymin = mean - 1.96*se, ymax = mean + 1.96*se)) +
+  geom_point(size = 3) +
+  geom_errorbar(width = 0.2) +
+  scale_color_brewer(palette = "Set2") +
+  facet_wrap(~ variable, scales = "free_y", ncol = 2) +
+  labs(title = "Cluster Profiles: Continuous Demographics",
+       x = NULL, y = "Weighted Mean") +
+  theme_minimal() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 25, hjust = 1))
+```
+
+```{r cluster demographics categorical, echo=F, include=T, fig.height=14, fig.width=12, warning=F, message=F}
+demo_vars_cat <- c("gender", "education", "race", "region", "metro",
+                   "eats_meat", "vote_2024", "votechoice_2024")
+
+personal_weights <- personal_weights %>%
+  mutate(across(all_of(demo_vars_cat), as.character))
+
+demo_cat_long <- personal_weights %>%
+  filter(!is.na(cluster)) %>%
+  select(all_of(demo_vars_cat), cluster, weight) %>%
+  pivot_longer(cols = all_of(demo_vars_cat),
+               names_to = "variable", values_to = "category") %>%
+  filter(!is.na(category) & category != "") %>%
+  group_by(cluster, variable, category) %>%
+  summarize(weighted_n = sum(weight, na.rm = TRUE), .groups = "drop") %>%
+  group_by(cluster, variable) %>%
+  mutate(pct = weighted_n / sum(weighted_n) * 100) %>%
+  ungroup()
+
+ggplot(demo_cat_long, aes(x = category, y = pct, color = cluster)) +
+  geom_point(size = 2, position = position_dodge(width = 0.5)) +
+  scale_color_brewer(palette = "Set2") +
+  facet_wrap(~ variable, scales = "free_x", ncol = 2) +
+  labs(title = "Cluster Profiles: Categorical Demographics",
+       x = NULL, y = "% within Cluster") +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r cluster demographics table, echo=F, include=T, warning=F, message=F}
+summary_table <- personal_weights %>%
+  filter(!is.na(cluster)) %>%
+  mutate(
+    male        = as.numeric(gender == "Male"),
+    hunter = as.numeric(hunter_status == 3),
+    knows_hunter = as.numeric(hunter_status == 2),
+    republican  = as.numeric(votechoice_2024 == "Donald Trump"),
+    urban       = as.numeric(metro == "Metropolitan"),
+    eats_meat_y = as.numeric(eats_meat == "TRUE"),
+    eats_game = as.numeric(game_meat_freq >= 2),
+    college = as.numeric(education %in% c("4-year or bachelor degree", "Post-graduate degree"))
+  ) %>%
+  group_by(cluster) %>%
+  summarize(
+    `% Male`             = round(weighted.mean(male,               weight, na.rm = TRUE) * 100, 1),
+    `% Hunter (self/past)` = round(weighted.mean(hunter, weight, na.rm = TRUE) * 100, 1),
+    `% Know a Hunter` = round(weighted.mean(knows_hunter, weight, na.rm = TRUE) * 100, 1),
+    `% Trump Voter`       = round(weighted.mean(republican,         weight, na.rm = TRUE) * 100, 1),
+    `% Metro`            = round(weighted.mean(urban,              weight, na.rm = TRUE) * 100, 1),
+    `% Eats Meat`        = round(weighted.mean(eats_meat_y,        weight, na.rm = TRUE) * 100, 1),
+    `% Eats Game Meat` = round(weighted.mean(eats_game, weight, na.rm = TRUE) * 100, 1),
+    `% College Educated`      = round(weighted.mean(college,                    weight, na.rm = TRUE) * 100, 1),
+    `Mean CN` = round(weighted.mean(christian_nationalism_score, weight, na.rm = TRUE), 2),
+    `Mean Pol. Ideology` = round(weighted.mean(political_ideology, weight, na.rm = TRUE), 1),
+    `Mean WVO Mutualism` = round(weighted.mean(wvo_mutualism,      weight, na.rm = TRUE), 1),
+    `Mean WVO Domination`= round(weighted.mean(wvo_domination,     weight, na.rm = TRUE), 1),
+    .groups = "drop"
+  )
+
+kable(summary_table, caption = "Key Demographic Characteristics by Cluster")
+```
