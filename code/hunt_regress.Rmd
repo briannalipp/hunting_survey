@@ -1,0 +1,1919 @@
+---
+title: "Predictors of Hunting Support/Opposition"
+author: "Alex Metcalf"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: journal
+    toc: true
+    toc_float: true
+---
+
+# Introduction
+
+This document builds a regression model predicting support and opposition to hunting and trapping. Prior to modeling, we reduce dimensionality in the reasons, methods, and identity variables via factor analyses, and clean and recode demographic predictors for use in the regression.
+
+```{r load data, echo=F, warning=F, message=F}
+library(here)
+library(tidyverse)
+library(psych)
+library(GPArotation)   # oblimin rotation, required by psych
+library(ggrepel)
+library(Hmisc)
+library(knitr)
+library(kableExtra)
+library(e1071)
+library(ragg)
+library(pheatmap)
+library(nortest)
+library(tseries)
+library(moments)
+library(srvyr)
+library(survey)
+library(patchwork)   # side-by-side path diagrams
+
+# -- namespace pinning --------------------------------------------------------
+# Bare verb names always resolve to the tidyverse version, regardless of what is
+# attached later. MASS, Hmisc, car and stats all mask at least one of these.
+# To use a masked version deliberately, call it explicitly:
+#   MASS::select()   car::recode()   stats::filter()   stats::lag()
+select    <- dplyr::select
+filter    <- dplyr::filter
+summarize <- dplyr::summarize
+summarise <- dplyr::summarise
+recode    <- dplyr::recode
+lag       <- dplyr::lag
+
+fam       <- "Libre Franklin"
+
+# Okabe-Ito, with one deviation: the canonical amber #E69F00 is too light to
+# read as text or thin lines on white (contrast ratio ~2.2:1 against a 4.5:1
+# requirement). Darkened to #9C6A00, which clears AA for small text while
+# keeping the hue distinct from the other five.
+okabe_ito <- c("#0072B2", "#9C6A00", "#009E73", "#CC79A7", "#D55E00", "#56B4E9")
+theme_set(theme_minimal(base_size = 12, base_family = fam))
+options(knitr.kable.NA = "")
+
+# knitr renders figures with the base png device by default, which ignores
+# systemfonts and cannot see Libre Franklin. ragg_png is the knit-time
+# equivalent of RStudio's AGG backend setting.
+knitr::opts_chunk$set(dev = "ragg_png")
+
+# house table style — use ktab() in place of kable() throughout
+ktab <- function(x, caption = NULL, ...) {
+  kable(x, caption = caption, ...) %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                  full_width = FALSE, position = "left")
+}
+
+# -- factor analysis and scale construction helpers ---------------------------
+# used by the identity, reasons and methods blocks below
+
+loadings_table <- function(efa, cutoff = 0.30) {
+  L     <- unclass(efa$loadings)
+  out   <- as.data.frame(L)
+  out[] <- lapply(out, function(x) ifelse(abs(x) < cutoff, NA_real_, round(x, 3)))
+  out %>%
+    rownames_to_column("item") %>%
+    mutate(h2       = round(efa$communality[item], 2),
+           dominant = colnames(L)[apply(abs(L), 1, which.max)],
+           top_load = apply(abs(L), 1, max)) %>%
+    arrange(dominant, desc(top_load)) %>%
+    select(-top_load)
+}
+
+phi_text <- function(efa) {
+  p <- efa$Phi
+  if (is.null(p) || ncol(p) < 2) return("n/a")
+  idx <- which(upper.tri(p), arr.ind = TRUE)
+  paste(sprintf("%s-%s r = %.2f",
+                rownames(p)[idx[, "row"]], colnames(p)[idx[, "col"]], p[upper.tri(p)]),
+        collapse = "; ")
+}
+
+var_footer <- function(efa) {
+  v <- efa$Vaccounted
+  paste0("SS loadings ", paste(round(v["SS loadings", ], 2), collapse = " / "),
+         "; cumulative variance ", round(max(v["Cumulative Var", ]), 3))
+}
+
+# Spearman-Brown for two-item scales; alpha is biased at k = 2
+spearman_brown <- function(df, items) {
+  r <- cor(df[[items[1]]], df[[items[2]]], use = "pairwise.complete.obs")
+  (2 * r) / (1 + r)
+}
+
+# McDonald's omega from a one-factor model. psych::omega() attempts a
+# Schmid-Leiman transform that is undefined at one factor and emits warnings.
+omega_total <- function(df, items) {
+  f <- fa(df[, items], nfactors = 1, fm = "ml", cor = "poly")
+  l <- as.numeric(f$loadings)
+  sum(l)^2 / (sum(l)^2 + sum(1 - l^2))
+}
+
+alpha_table <- function(df, scales) {
+  map_dfr(names(scales), function(nm) {
+    items <- scales[[nm]]
+    a <- psych::alpha(df[, items], warnings = FALSE)
+    tibble(scale  = nm,
+           k      = length(items),
+           alpha  = round(a$total$raw_alpha, 3),
+           omega  = if (length(items) >= 3) round(omega_total(df, items), 3) else NA_real_,
+           sb     = if (length(items) == 2) round(spearman_brown(df, items), 3) else NA_real_,
+           mean_r = round(a$total$average_r, 3))
+  })
+}
+
+# composites require responses to at least half a scale's items
+composite <- function(df, items, min_items = ceiling(length(items) / 2)) {
+  m   <- as.matrix(df[, items, drop = FALSE])
+  out <- rowMeans(m, na.rm = TRUE)
+  out[rowSums(!is.na(m)) < min_items] <- NA_real_
+  out
+}
+
+# -- inline number helpers ----------------------------------------------------
+# Every figure quoted in the prose is pulled through one of these, so the text
+# recomputes with the analysis and cannot drift from the tables.
+# ggplot does not wrap captions — long ones run off the plot. Wrap explicitly.
+wrap_cap <- function(x, width = 95) str_wrap(paste(x, collapse = " "), width = width)
+
+fmt     <- function(x, d = 2) sprintf(paste0("%.", d, "f"), x)
+eig_of  <- function(pa, i, d = 2) fmt(pa$fa.values[i], d)
+ratio_of <- function(pa, i, j, d = 0) fmt(pa$fa.values[i] / pa$fa.values[j], d)
+load_of <- function(efa, item, d = 2) {
+  L <- unclass(efa$loadings)
+  fmt(L[item, which.max(abs(L[item, ]))], d)
+}
+cor_of  <- function(m, v1, v2, d = 2) fmt(m[v1, v2], d)
+skew_of <- function(x, d = 2) fmt(e1071::skewness(x, na.rm = TRUE), d)
+desc_of <- function(tbl, row, col, d = 2) fmt(tbl[[col]][tbl[[1]] == row], d)
+
+personal_weights <- readRDS(here("data", "personal_weights.rds"))
+```
+
+# Variable Cleaning and Recoding
+## Categorical variables
+
+First, let's check the levels of all categorical variables we intend to use and recode as needed.
+
+```{r check levels, echo=T}
+personal_weights %>% count(gender)
+personal_weights %>% count(education)
+personal_weights %>% count(eats_meat)
+personal_weights %>% count(hunter_status)
+personal_weights %>% count(has_pets)
+```
+
+Now let's recode those categorical variables. Note that education will become "BS or higher", gender will become "female" and hunter status will become "is a hunter" variable and "knows a hunter" variables. Note also that knows_hunter is 0 if they hunt themselves, so it's I don't hunt but I know someone, rather than just I know a hunter - important for interpretation later.
+
+```{r recode variables, echo=F, warning=F, message=F}
+personal_weights <- personal_weights %>%
+  mutate(
+    female = case_when(
+      gender == "Female" ~ 1,
+      gender == "Male"   ~ 0,
+      gender == "Other"  ~ 0,
+      TRUE               ~ NA_real_
+),
+    
+    # Education: 1 = bachelor's degree or higher, 0 = less than bachelor's
+    college_grad = as.numeric(education %in% c(
+      "4-year or bachelor degree",
+      "Post-graduate degree"
+    )),
+    
+    # Eats meat: logical to numeric
+    eats_meat_n = as.numeric(eats_meat),
+    
+    # Hunter status: two binary variables
+    has_hunted    = as.numeric(hunter_status == "Yes, I hunt or have hunted in the past"),
+    knows_hunter  = as.numeric(hunter_status == "Yes, I know someone who hunts"),
+    
+    # Has pets: logical to numeric
+    has_pets_n = as.numeric(has_pets)
+  )
+
+# Verify recodes
+personal_weights %>% count(gender, female)
+personal_weights %>% count(education, college_grad)
+personal_weights %>% count(eats_meat, eats_meat_n)
+personal_weights %>% count(hunter_status, has_hunted, knows_hunter)
+personal_weights %>% count(has_pets, has_pets_n)
+```
+
+## Continuous variables
+```{r check continuous, echo=F}
+personal_weights <- personal_weights %>%
+  mutate(age_group4 = na_if(trimws(as.character(age_group4)), ""),
+         age = case_when(
+           age_group4 == "18-29" ~ (18 + 29) / 2,   # 23.5
+           age_group4 == "30-49" ~ (30 + 49) / 2,   # 39.5
+           age_group4 == "50-64" ~ (50 + 64) / 2,   # 57
+           age_group4 == "65+"   ~ 67,              # chosen representative for 65+
+           TRUE ~ NA_real_
+         ))
+
+# Add to your summary table
+personal_weights %>%
+  select(
+    political_ideology,
+    game_meat_freq,
+    wvo_mutualism,
+    wvo_domination,
+    christian_nationalism_score,
+    identify_hunters, identify_ranchers, identify_farmers, identify_landowners,
+    identify_environmentalists, identify_outdoor_rec, identify_outdoor_viewers,
+    identify_anglers,
+    hunting_support, trapping_support,
+    age
+  ) %>%
+  summary()
+```
+
+The only one that is a little strange here is the "game_meat_freq" - but I'm deciding to keep that as an ordinal predictor right now, although I want to recode it to be 0 to 3 (so that 0 = "never").
+
+```{r recode game meat, echo=F, warning=F, message=F}
+personal_weights <- personal_weights %>%
+  mutate(game_meat_freq = game_meat_freq - 1)
+
+# Verify
+personal_weights %>% count(game_meat_freq)
+```
+
+# Pre-Regression Diagnostics
+
+## Distributions and Descriptive Statistics
+
+```{r descriptives, echo=F, include=T, warning=F, message=F}
+diag_vars <- c(
+  "hunting_support", "trapping_support",
+  "political_ideology", "game_meat_freq",
+  "wvo_mutualism", "wvo_domination", "christian_nationalism_score",
+  "identify_hunters", "identify_ranchers", "identify_farmers",
+  "identify_landowners", "identify_environmentalists",
+  "identify_outdoor_rec", "identify_outdoor_viewers", "identify_anglers"
+)
+
+personal_weights %>%
+  select(all_of(diag_vars)) %>%
+  pivot_longer(cols = everything(), names_to = "Variable", values_to = "value") %>%
+  group_by(Variable) %>%
+  dplyr::summarize(
+    Min    = round(min(value,  na.rm = TRUE), 2),
+    Mean   = round(mean(value, na.rm = TRUE), 2),
+    Median = round(median(value, na.rm = TRUE), 2),
+    Max    = round(max(value,  na.rm = TRUE), 2),
+    SD     = round(sd(value,   na.rm = TRUE), 2),
+    `N Missing` = sum(is.na(value)),
+    .groups = "drop"
+  ) %>%
+  ktab(caption = "Descriptive Statistics: Continuous Predictors and Outcomes")
+```
+
+
+```{r distributions, echo=F, include=T, fig.height=12, fig.width=10, warning=F, message=F}
+# unweighted densities and per-variable (unweighted) means
+means_df <- personal_weights %>%
+  select(all_of(diag_vars)) %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "value") %>%
+  group_by(variable) %>%
+  dplyr::summarize(mean = mean(value, na.rm = TRUE), .groups = "drop")
+
+personal_weights %>%
+  select(all_of(diag_vars)) %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "value") %>%
+  ggplot(aes(x = value)) +
+  geom_density(fill = "grey70", color = "grey40", alpha = 0.7, adjust = 1.5) +
+  geom_vline(data = means_df, aes(xintercept = mean),
+             linetype = "dashed", color = okabe_ito[5], linewidth = 0.6,
+             inherit.aes = FALSE) +
+  facet_wrap(~ variable, scales = "free", ncol = 3) +
+  labs(title = "Distributions of continuous predictors and outcomes",
+       subtitle = "Unweighted; dashed line marks the mean",
+       x = NULL, y = "Density") +
+  theme(plot.title.position = "plot",
+        plot.title = element_text(face = "bold", size = rel(1.15)),
+        plot.subtitle = element_text(color = "grey35"),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(face = "bold", hjust = 0))
+
+ggsave(here("figs", "distributions_raw.png"),
+       width = 10, height = 12, dpi = 300, device = agg_png)
+```
+
+There seems to be some skewness to the identity variables, but we're going to combine those (data reduction), so let's do that first.
+
+# Identity: Data Reduction
+
+Nine items (Q24) ask how strongly respondents identify with different groups, on a 5-point scale from "Not at all" to "Extremely". As with the other item blocks, extraction is maximum likelihood with oblimin rotation on polychoric correlations.
+
+```{r identity setup, echo=F, include=T, warning=F, message=F}
+identity_vars <- c(
+  "identify_hunters", "identify_ranchers", "identify_environmentalists",
+  "identify_farmers", "identify_small_business", "identify_landowners",
+  "identify_outdoor_rec", "identify_outdoor_viewers", "identify_anglers")
+
+id_df <- personal_weights %>% select(all_of(identity_vars)) %>% as.data.frame()
+
+tibble(item   = identity_vars,
+       n_miss = colSums(is.na(id_df)),
+       mean   = round(colMeans(id_df, na.rm = TRUE), 2),
+       sd     = round(apply(id_df, 2, sd, na.rm = TRUE), 2)) %>%
+  ktab(caption = "Identity items: descriptives")
+
+id_poly <- polychoric(id_df)$rho
+
+tibble(block      = "Identity",
+       n_items    = length(identity_vars),
+       KMO        = round(KMO(id_poly)$MSA, 3),
+       bartlett_p = signif(cortest.bartlett(id_poly, n = nrow(id_df))$p.value, 3)) %>%
+  ktab(caption = "Sampling adequacy and sphericity (polychoric)")
+```
+
+## How many factors?
+
+```{r identity dimensionality, echo=F, include=T, warning=F, message=F, fig.height=3.8, fig.width=7}
+set.seed(42)
+id_par <- fa.parallel(id_df, fa = "both", cor = "poly", n.iter = 100, plot = FALSE)
+
+id_eigen <- tibble(factor    = seq_along(id_par$fa.values),
+                   observed  = round(id_par$fa.values, 3),
+                   simulated = round(id_par$fa.sim, 3),
+                   retain    = id_par$fa.values > id_par$fa.sim)
+
+id_eigen %>%
+  ktab(caption = paste0("Identity: parallel analysis eigenvalues (100 iterations, ",
+                        "polychoric). Suggested: ", id_par$nfact, "."))
+
+id_eigen %>%
+  pivot_longer(c(observed, simulated), names_to = "series", values_to = "eigenvalue") %>%
+  mutate(series = recode(series, observed = "Observed",
+                         simulated = "Simulated (random data)")) %>%
+  ggplot(aes(x = factor, y = eigenvalue,
+             color = series, shape = series, linetype = series)) +
+  geom_hline(yintercept = 0, color = "grey80", linewidth = 0.4) +
+  geom_line(linewidth = 0.6) +
+  geom_point(size = 2.2) +
+  scale_x_continuous(breaks = seq_len(max(id_eigen$factor))) +
+  scale_color_manual(values = c("Observed" = okabe_ito[1],
+                                "Simulated (random data)" = "grey55")) +
+  scale_shape_manual(values = c("Observed" = 16, "Simulated (random data)" = 17)) +
+  scale_linetype_manual(values = c("Observed" = "solid",
+                                   "Simulated (random data)" = "dashed")) +
+  labs(x = "Factor", y = "Eigenvalue",
+       caption = wrap_cap("Horn's parallel analysis, 100 iterations, polychoric correlations.")) +
+  theme(panel.grid.minor = element_blank(), panel.grid.major.x = element_blank(),
+        plot.caption = element_text(color = "grey45", hjust = 0, size = rel(0.8)),
+        axis.title = element_text(color = "grey20"),
+        legend.title = element_blank(), legend.position = "top")
+
+ggsave(here("figs", "identity_scree.png"),
+       width = 7, height = 3.8, dpi = 300, device = agg_png)
+
+set.seed(42)
+id_efa2 <- fa(id_df, nfactors = 2, rotate = "oblimin", fm = "ml", cor = "poly")
+id_efa3 <- fa(id_df, nfactors = 3, rotate = "oblimin", fm = "ml", cor = "poly")
+id_efa4 <- fa(id_df, nfactors = 4, rotate = "oblimin", fm = "ml", cor = "poly")
+
+tibble(solution = c("2-factor", "3-factor", "4-factor"),
+       RMSEA    = round(c(id_efa2$RMSEA[1], id_efa3$RMSEA[1], id_efa4$RMSEA[1]), 3),
+       TLI      = round(c(id_efa2$TLI, id_efa3$TLI, id_efa4$TLI), 3),
+       BIC      = round(c(id_efa2$BIC, id_efa3$BIC, id_efa4$BIC), 1)) %>%
+  ktab(caption = "Identity: fit across candidate solutions")
+```
+
+Parallel analysis suggests `r id_par$nfact` factors, but this should not be taken at face value. The first eigenvalue (`r eig_of(id_par, 1)`) is roughly `r ratio_of(id_par, 1, 2)` times the second (`r eig_of(id_par, 2)`), and the third and fourth are `r eig_of(id_par, 3)` and `r eig_of(id_par, 4)`, both trivial. Parallel analysis over-retains when one factor dominates, because the simulated eigenvalues collapse toward zero and small factors clear the bar.
+
+Fit improves monotonically with each added factor without ever becoming good. That pattern is the signature of an unmodelled general factor absorbing variance, not evidence for four dimensions.
+
+```{r identity general factor, echo=F, include=T, warning=F, message=F}
+om <- omega(id_df, nfactors = 3, poly = TRUE, plot = FALSE)
+
+tibble(coefficient = c("omega_h (general factor)", "omega_total"),
+       value       = round(c(om$omega_h, om$omega.tot), 3)) %>%
+  ktab(caption = paste("Proportion of reliable variance attributable to a general",
+                       "factor. omega_h > .70 indicates a dominant general dimension."))
+```
+
+**This is the central result for the identity block.** With ω~h~ = .77 against ω~total~ = .95, roughly 81% of the reliable variance belongs to a single general factor, something like *identification with rural, land-based and outdoor life*. Two factors are retained on theoretical grounds rather than because the data demand them, and the marginal fit (RMSEA = .18, TLI = .82) is reported rather than hidden.
+
+Critically, the two subscales are **not opposing poles**. If they were, they would correlate negatively. They correlate *r* = .58 at the composite level and *r* = .62 as factors. Respondents who identify with hunters and ranchers also tend to identify with wildlife viewers and outdoor recreationists. Much of the human-dimensions literature treats these as a trade-off; these data do not support that.
+
+## Factor structure
+
+```{r identity loadings, echo=F, include=T, warning=F, message=F}
+id_efa <- id_efa2
+
+loadings_table(id_efa) %>%
+  ktab(caption = paste0(
+    "Identity — EFA loadings (2 factors, ML, oblimin, polychoric). Loadings below ",
+    "|0.30| suppressed; h2 = communality. ", var_footer(id_efa),
+    ". Factor correlation: ", phi_text(id_efa), "."))
+```
+
+No item cross-loads above |0.30|. The consumptive factor comprises hunters (`r load_of(id_efa, "identify_hunters")`), ranchers (`r load_of(id_efa, "identify_ranchers")`), farmers (`r load_of(id_efa, "identify_farmers")`), anglers (`r load_of(id_efa, "identify_anglers")`), small business (`r load_of(id_efa, "identify_small_business")`) and landowners (`r load_of(id_efa, "identify_landowners")`); the non-consumptive factor comprises outdoor viewers (`r load_of(id_efa, "identify_outdoor_viewers")`), outdoor recreationists (`r load_of(id_efa, "identify_outdoor_rec")`) and environmentalists (`r load_of(id_efa, "identify_environmentalists")`).
+
+## Reliability
+
+```{r identity reliability, echo=F, include=T, warning=F, message=F}
+identity_scales <- list(
+  ID_consum      = c("identify_hunters", "identify_ranchers", "identify_farmers",
+                     "identify_landowners", "identify_anglers",
+                     "identify_small_business"),
+  ID_non_consume = c("identify_environmentalists", "identify_outdoor_rec",
+                     "identify_outdoor_viewers"))
+
+alpha_table(id_df, identity_scales) %>%
+  ktab(caption = "Identity scale reliability")
+
+nc3 <- identity_scales$ID_non_consume
+a3  <- psych::alpha(id_df[, nc3], warnings = FALSE)
+
+set.seed(42)
+efa_noenv <- fa(id_df %>% select(-identify_environmentalists),
+                nfactors = 2, rotate = "oblimin", fm = "ml", cor = "poly")
+
+a3$item.stats[, c("r.drop", "mean", "sd")] %>%
+  round(3) %>%
+  ktab(caption = "Non-consumptive scale: corrected item-total correlations")
+
+tibble(version = c("including environmentalists", "excluding environmentalists"),
+       RMSEA   = round(c(id_efa2$RMSEA[1], efa_noenv$RMSEA[1]), 3),
+       TLI     = round(c(id_efa2$TLI, efa_noenv$TLI), 3)) %>%
+  ktab(caption = "Sensitivity check: environmentalists item")
+```
+
+Omega exceeds alpha by a wide margin on both scales (.919 vs .878; .830 vs .775), unlike the reasons and methods blocks where the two agreed to within .002. Tau-equivalence does not hold here (loadings range from .51 to .97), so omega is the preferred coefficient and alpha is reported for comparability only.
+
+`identify_environmentalists` is the weakest item: lowest communality (.32), lowest loading (.53), and correlations of .41 and .47 with the other two non-consumptive items against .71 between them. Dropping it would raise internal consistency (a two-item Spearman-Brown of .83 against a three-item alpha of .78). It is nonetheless retained. Its corrected item-total correlation is .48, removing it does not improve model fit (RMSEA .182 → .190), and the two remaining items correlate at .71, close to the same question asked twice. High alpha is easy to buy with redundant items; the third item lowers consistency precisely because it contributes different information. Environmentalist identity is also substantively distinct from outdoor recreation, and this is the only item measuring it.
+
+## Composites
+
+```{r identity composites, echo=F, include=T, warning=F, message=F}
+for (nm in names(identity_scales)) {
+  personal_weights[[nm]] <- composite(personal_weights, identity_scales[[nm]])
+}
+
+personal_weights <- personal_weights %>%
+  mutate(across(all_of(names(identity_scales)), ~ as.numeric(scale(.x)),
+                .names = "{.col}_z"))
+
+personal_weights %>%
+  select(all_of(names(identity_scales))) %>%
+  pivot_longer(everything(), names_to = "Composite", values_to = "value") %>%
+  group_by(Composite) %>%
+  dplyr::summarize(
+    Mean     = round(mean(value, na.rm = TRUE), 2),
+    SD       = round(sd(value, na.rm = TRUE), 2),
+    Min      = round(min(value, na.rm = TRUE), 2),
+    Max      = round(max(value, na.rm = TRUE), 2),
+    Skew     = round(e1071::skewness(value, na.rm = TRUE), 2),
+    `N miss` = sum(is.na(value)),
+    .groups  = "drop") %>%
+  ktab(caption = "Identity composite variables")
+```
+
+Both means sit well below the scale midpoint, so most respondents do not identify strongly with any of these groups, which matters for interpreting coefficients later. The identity items permitted skips (2–6 missing per item), so the minimum-items rule sets two cases to `NA` on the non-consumptive composite.
+
+Now let's take a look at the distributions again, but this time with these composite variables:
+
+```{r distributions2, echo=F, include=T, warning=T, message=F}
+# updated diagnostic variables: replace identity items with the two composites
+diag_vars_updated <- setdiff(diag_vars, c(
+  "identify_hunters", "identify_ranchers", "identify_farmers",
+  "identify_landowners", "identify_environmentalists",
+  "identify_outdoor_rec", "identify_outdoor_viewers", "identify_anglers"
+))
+# use the composite names created earlier
+diag_vars_updated <- c(diag_vars_updated, "ID_non_consume", "ID_consum")
+
+# compute unweighted per-variable means
+means_df <- personal_weights %>%
+  select(all_of(diag_vars_updated)) %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "value") %>%
+  group_by(variable) %>%
+  dplyr::summarize(mean = mean(value, na.rm = TRUE), .groups = "drop")
+
+# plot unweighted densities with per-variable mean lines
+personal_weights %>%
+  select(all_of(diag_vars_updated)) %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "value") %>%
+  ggplot(aes(x = value)) +
+  geom_density(fill = "grey70", color = "grey40", alpha = 0.7, adjust = 1.5) +
+  geom_vline(data = means_df, aes(xintercept = mean),
+             linetype = "dashed", color = okabe_ito[5], linewidth = 0.6,
+             inherit.aes = FALSE) +
+  facet_wrap(~ variable, scales = "free", ncol = 3) +
+  labs(title = "Distributions with identity composites substituted",
+       subtitle = "Unweighted; dashed line marks the mean",
+       x = NULL, y = "Density") +
+  theme(plot.title.position = "plot",
+        plot.title = element_text(face = "bold", size = rel(1.15)),
+        plot.subtitle = element_text(color = "grey35"),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(face = "bold", hjust = 0))
+
+ggsave(here("figs", "distributions_composites.png"),
+       width = 10, height = 8, dpi = 300, device = agg_png)
+
+
+```
+
+Ok, this looks better, but still have some concerns about the skewness of game meat and ID_consum. Let's quantitatively evalute all these:
+
+```{r skewness, echo=F, include=T, warning=T, message=F}
+# Variables to diagnose (updated, including composites)
+diag_vars_updated <- c(
+  "hunting_support", "trapping_support",
+  "political_ideology", "game_meat_freq",
+  "wvo_mutualism", "wvo_domination", "christian_nationalism_score",
+  "ID_non_consume", "ID_consum"
+)
+
+# prepare data
+vars_df <- personal_weights %>% select(all_of(diag_vars_updated))
+
+# 1) Skewness and kurtosis
+sk <- sapply(vars_df, function(x) e1071::skewness(x, na.rm = TRUE))
+kt <- sapply(vars_df, function(x) e1071::kurtosis(x, na.rm = TRUE))
+sk_kurt_df <- data.frame(variable = names(sk), skewness = sk, kurtosis = kt)
+print(sk_kurt_df)
+
+# 2) Shapiro-Wilk normality test (only when n between 3 and 5000; otherwise use approx / note)
+sh_p <- sapply(vars_df, function(x) {
+  nx <- sum(!is.na(x))
+  if (nx >= 3 && nx <= 5000) {
+    tryCatch(shapiro.test(x[!is.na(x)])$p.value, error = function(e) NA)
+  } else NA
+})
+sh_df <- data.frame(variable = names(sh_p), shapiro_p = sh_p)
+print(sh_df)
+
+# 3) QQ plots (faceted)
+vars_df %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "value") %>%
+  ggplot(aes(sample = value)) +
+  stat_qq(color = okabe_ito[1], alpha = 0.4, size = 0.8) +
+  stat_qq_line(color = "grey30", linetype = "dashed") +
+  facet_wrap(~ variable, scales = "free", ncol = 3) +
+  labs(title = "QQ plots: diagnostics for distributional normality",
+       subtitle = "Dashed line is the theoretical normal quantile",
+       x = "Theoretical quantiles", y = "Sample quantiles") +
+  theme(plot.title.position = "plot",
+        plot.title = element_text(face = "bold", size = rel(1.15)),
+        plot.subtitle = element_text(color = "grey35"),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(face = "bold", hjust = 0))
+
+ggsave(here("figs", "qq_diagnostics.png"),
+       width = 10, height = 8, dpi = 300, device = agg_png)
+
+# 4) Summary statistics (median, IQR, range, missingness)
+summary_stats <- vars_df %>%
+  summarise(across(everything(), list(
+    n = ~sum(!is.na(.)),
+    missing = ~sum(is.na(.)),
+    mean = ~mean(., na.rm=TRUE),
+    median = ~median(., na.rm=TRUE),
+    sd = ~sd(., na.rm=TRUE),
+    IQR = ~IQR(., na.rm=TRUE),
+    min = ~min(., na.rm=TRUE),
+    max = ~max(., na.rm=TRUE)
+  ), .names = "{.col}_{.fn}"))
+print(summary_stats)
+
+vars <- vars_df  # your data.frame of variables
+
+results <- lapply(vars, function(x){
+  x <- x[!is.na(x)]
+  n <- length(x)
+  sk <- e1071::skewness(x)
+  kt <- e1071::kurtosis(x)             # note: this returns "kurtosis" not excess in e1071
+  sw_p <- if(n>=3 && n<=5000) tryCatch(shapiro.test(x)$p.value, error=function(e) NA) else NA
+  ad_p <- if(n>=8) tryCatch(nortest::ad.test(x)$p.value, error=function(e) NA) else NA
+  jb_p <- tryCatch(tseries::jarque.bera.test(x)$p.value, error=function(e) NA)
+  # D'Agostino using moments package (approx)
+  da_p <- tryCatch(moments::agostino.test(x)$p.value, error=function(e) NA)
+  list(n=n, skewness=sk, kurtosis=kt, shapiro_p=sw_p, ad_p=ad_p, jarque_bera_p=jb_p, dagostino_p=da_p)
+})
+
+# assemble into a data.frame
+res_df <- bind_rows(lapply(results, as.data.frame), .id = "variable")
+print(res_df)
+
+```
+
+Ok, it looks like game_meat_freq is positively skewed (`r skew_of(personal_weights$game_meat_freq)`) and should be transformed. Everything else falls within acceptable bounds. Kurtosis is only bad for game_meat_freq; the rest of the tails are not extreme. Normality is rejected across the board, but this is a high sample size so I'd expect that. They all look pretty good in the distributions and the QQ plots.
+
+NOTE: when we get to regression, we should prefer robust standard errors and use generalized models (e.g., GLM). Let's fix that game_meat_freq variable to just be "yes/no" or 0/1 and include that in our evaluation of the binary variables instead:
+
+```{r fix game_meat, echo=F, include=T, warning=T, message=F}
+# create binary: 0 if original == 1, 1 if original >= 2, keep NA as NA
+personal_weights <- personal_weights %>%
+  mutate(
+    game_meat = case_when(
+      is.na(game_meat_freq) ~ NA_integer_,
+      game_meat_freq == 1 ~ 1,
+      game_meat_freq >= 2 ~ 1,
+      TRUE ~ 0
+    )
+  )
+
+# cross-tabulation of old vs new
+table_old_new <- table(
+  old = personal_weights$game_meat_freq,
+  new = personal_weights$game_meat,
+  useNA = "ifany"
+)
+print(table_old_new)
+
+# also a simple frequency table for the new binary variable
+print(prop.table(table(personal_weights$game_meat, useNA = "ifany")))
+
+
+```
+
+## Binary variables
+
+```{r binary descriptives, echo=F, include=T, warning=F, message=F}
+binary_vars <- c("female", "college_grad", "eats_meat_n",
+                 "has_hunted", "knows_hunter", "has_pets_n", "game_meat")
+
+personal_weights %>%
+  select(all_of(binary_vars)) %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "value") %>%
+  group_by(variable) %>%
+  dplyr::summarize(
+    `% = 1` = round(mean(value, na.rm = TRUE) * 100, 1),
+    `% = 0` = round((1 - mean(value, na.rm = TRUE)) * 100, 1),
+    `N missing` = sum(is.na(value)),
+    .groups = "drop"
+  ) %>%
+  ktab(caption = "Binary Predictor Summary")
+```
+
+Ok, here, we're going to keep an eye on the vegetarian (eats_meat_n) and has_hunted. Both pretty low prevalence. Theoretically they both seem relevant - maybe the has_hunted less so. Both seem strongly related to our outcome variables, but if they cause modeling problems later (VIF, huge SEs), we can drop them, use a penalized regression approach, etc.
+
+# Reasons and Methods: Data Reduction
+
+Two blocks of items remain to be reduced: the reasons hunting is acceptable (Q13, eight items) and the acceptability of specific hunting methods (Q14, nine items), both measured on 5-point acceptability scales. They are factored separately because they answer different questions (*why* hunting is acceptable versus *how*), and a joint solution would impose a shared structure across two distinct constructs.
+
+Unlike the identity block above, these use exploratory factor analysis rather than principal components. The items are treated as indicators of latent acceptability dimensions, not simply as variables to compress. Extraction is maximum likelihood with oblimin (oblique) rotation, computed on polychoric correlations because the items are ordinal and the 1–5 spacing should not be assumed interval. Oblique rotation because acceptability dimensions are expected to correlate, and they do.
+
+These analyses are unweighted. Factor structure is a property of the instrument; the survey weights are for population estimation and enter at the regression stage.
+
+```{r rm setup, echo=F, include=T, warning=F, message=F}
+reason_items <- c(
+  "reason_food", "reason_recreation", "reason_population_control",
+  "reason_trophy", "reason_reduce_conflict", "reason_conservation_revenue",
+  "reason_indigenous_practice", "reason_cultural_tradition")
+
+method_items <- c(
+  "method_baiting", "method_captive_hunt", "method_trapping",
+  "method_neck_snares", "method_dogs_predators", "method_dogs_birds",
+  "method_aerial", "method_bow", "method_firearms")
+
+reason_df <- personal_weights %>% select(all_of(reason_items)) %>% as.data.frame()
+method_df <- personal_weights %>% select(all_of(method_items)) %>% as.data.frame()
+
+tibble(
+  block      = c("Reasons", "Methods"),
+  n_items    = c(length(reason_items), length(method_items)),
+  KMO        = round(c(KMO(reason_df)$MSA, KMO(method_df)$MSA), 3),
+  bartlett_p = signif(c(cortest.bartlett(reason_df)$p.value,
+                        cortest.bartlett(method_df)$p.value), 3)) %>%
+  ktab(caption = "Sampling adequacy and sphericity")
+```
+
+## How many factors?
+
+Horn's parallel analysis compares observed eigenvalues against those from random data of the same dimensions, retaining factors whose eigenvalue exceeds the simulated value.
+
+```{r parallel analysis, echo=F, include=T, warning=F, message=F, fig.height=3.8, fig.width=7}
+set.seed(42)
+reason_par <- fa.parallel(reason_df, fa = "both", cor = "poly", n.iter = 100, plot = FALSE)
+method_par <- fa.parallel(method_df, fa = "both", cor = "poly", n.iter = 100, plot = FALSE)
+
+parallel_table <- function(pa, block) {
+  tibble(block     = block,
+         factor    = seq_along(pa$fa.values),
+         observed  = round(pa$fa.values, 3),
+         simulated = round(pa$fa.sim, 3),
+         retain    = pa$fa.values > pa$fa.sim)
+}
+
+eigen_tbl <- bind_rows(parallel_table(reason_par, "Reasons"),
+                       parallel_table(method_par, "Methods"))
+
+eigen_tbl %>%
+  ktab(caption = paste0(
+    "Parallel analysis eigenvalues (100 iterations, polychoric). Retained: reasons = ",
+    reason_par$nfact, ", methods = ", method_par$nfact, "."))
+
+eigen_tbl %>%
+  pivot_longer(c(observed, simulated), names_to = "series", values_to = "eigenvalue") %>%
+  mutate(series = recode(series, observed = "Observed", simulated = "Simulated (random data)"),
+         block  = factor(block, levels = c("Reasons", "Methods"))) %>%
+  ggplot(aes(x = factor, y = eigenvalue,
+             color = series, shape = series, linetype = series)) +
+  geom_hline(yintercept = 0, color = "grey80", linewidth = 0.4) +
+  geom_line(linewidth = 0.6) +
+  geom_point(size = 2.2) +
+  facet_wrap(~ block, scales = "free_x") +
+  scale_x_continuous(breaks = seq_len(max(eigen_tbl$factor))) +
+  scale_color_manual(values = c("Observed" = okabe_ito[1],
+                                "Simulated (random data)" = "grey55")) +
+  scale_shape_manual(values = c("Observed" = 16, "Simulated (random data)" = 17)) +
+  scale_linetype_manual(values = c("Observed" = "solid",
+                                   "Simulated (random data)" = "dashed")) +
+  labs(x = "Factor", y = "Eigenvalue",
+       caption = wrap_cap("Horn's parallel analysis, 100 iterations, polychoric correlations.")) +
+  theme(panel.grid.minor = element_blank(), panel.grid.major.x = element_blank(),
+        plot.caption = element_text(color = "grey45", hjust = 0, size = rel(0.8)),
+        axis.title = element_text(color = "grey20"),
+        legend.title = element_blank(), legend.position = "top")
+
+ggsave(here("figs", "parallel_analysis_scree.png"),
+       width = 7, height = 3.8, dpi = 300, device = agg_png)
+```
+
+Parallel analysis retained three factors for the reasons block and two for methods. Because two factors would have been the intuitive choice for reasons, and because the number of factors drives everything downstream, both the two- and three-factor solutions were estimated and compared on fit.
+
+```{r reasons factor comparison, echo=F, include=T, warning=F, message=F}
+set.seed(42)
+reason_efa2 <- fa(reason_df, nfactors = 2, rotate = "oblimin", fm = "ml", cor = "poly")
+reason_efa3 <- fa(reason_df, nfactors = 3, rotate = "oblimin", fm = "ml", cor = "poly")
+
+tibble(
+  solution = c("2-factor", "3-factor"),
+  RMSEA    = round(c(reason_efa2$RMSEA[1], reason_efa3$RMSEA[1]), 3),
+  TLI      = round(c(reason_efa2$TLI, reason_efa3$TLI), 3),
+  BIC      = round(c(reason_efa2$BIC, reason_efa3$BIC), 1),
+  cum_var  = round(c(max(reason_efa2$Vaccounted["Cumulative Var", ]),
+                     max(reason_efa3$Vaccounted["Cumulative Var", ])), 3)) %>%
+  ktab(caption = paste("Reasons block: 2- vs 3-factor solution.",
+                        "RMSEA < .08 acceptable, < .05 good; TLI > .95 good; lower BIC preferred."))
+```
+
+The two-factor solution fits poorly (RMSEA = .140, TLI = .899) while the three-factor solution fits well (RMSEA = .038, TLI = .992) with a BIC advantage of roughly 330 points. Fit and parallel analysis agree, and three factors are retained.
+
+Worth noting for the write-up: two of the three reasons factors correlate at *r* = .75 (utilitarian and cultural). Strongly correlated factors are the condition under which parallel analysis is most prone to under-extracting, so the convergence between the eigenvalue criterion and the fit indices here is reassuring rather than incidental.
+
+## Factor structure
+
+```{r efa final, echo=F, include=T, warning=F, message=F}
+n_reason   <- 3
+n_method   <- 2
+reason_efa <- reason_efa3
+
+set.seed(42)
+method_efa <- fa(method_df, nfactors = n_method, rotate = "oblimin", fm = "ml", cor = "poly")
+
+loadings_table(reason_efa) %>%
+  ktab(caption = paste0(
+    "Reasons — EFA loadings (3 factors, ML, oblimin, polychoric). Loadings below |0.30| ",
+    "suppressed; h2 = communality. ", var_footer(reason_efa),
+    ". Factor correlations: ", phi_text(reason_efa), "."))
+
+loadings_table(method_efa) %>%
+  ktab(caption = paste0(
+    "Methods — EFA loadings (2 factors, ML, oblimin, polychoric). Loadings below |0.30| ",
+    "suppressed; h2 = communality. ", var_footer(method_efa),
+    ". Factor correlations: ", phi_text(method_efa), "."))
+```
+
+Reasons resolve into **utilitarian** (food, population control, reduce conflict, conservation revenue), **sport** (recreation, trophy), and **cultural** (indigenous practice, cultural tradition). Methods resolve into **contested** (baiting, captive hunt, trapping, neck snares, aerial) and **conventional** (bow, firearms, dogs for birds).
+
+Three items warrant comment. `method_dogs_predators` loads .47 and .44, a near-equal cross-load, and is excluded from both scales; it is carried forward as a standalone predictor instead, since hound hunting is contested in ways that cut across the contested/conventional distinction. `reason_food` cross-loads onto cultural at .33, which is substantively sensible given that subsistence is both, and it is retained where it loads more strongly. `reason_trophy` loads .96 with a communality of .93; not a Heywood case, but the sport factor is largely defined by this single item.
+
+## Scale reliability
+
+Cronbach's alpha is reported for scales of three or more items, with McDonald's omega alongside because alpha assumes tau-equivalence. For the two-item scales, the Spearman-Brown coefficient is reported instead; alpha is biased and difficult to interpret at *k* = 2 (Eisinga, Grotenhuis & Pelzer, 2013).
+
+```{r reliability, echo=F, include=T, warning=F, message=F}
+reason_scales <- list(
+  reason_utilitarian = c("reason_food", "reason_population_control",
+                         "reason_reduce_conflict", "reason_conservation_revenue"),
+  reason_sport       = c("reason_recreation", "reason_trophy"),
+  reason_cultural    = c("reason_indigenous_practice", "reason_cultural_tradition"))
+
+method_scales <- list(
+  method_contested    = c("method_baiting", "method_captive_hunt", "method_trapping",
+                          "method_neck_snares", "method_aerial"),
+  method_conventional = c("method_dogs_birds", "method_bow", "method_firearms"))
+
+bind_rows(alpha_table(reason_df, reason_scales),
+          alpha_table(method_df, method_scales)) %>%
+  ktab(caption = "Scale reliability")
+
+tibble(
+  scale   = c("method_contested", "method_contested",
+              "reason_utilitarian", "reason_utilitarian"),
+  version = c("excluding dogs_predators", "including dogs_predators",
+              "including conservation_revenue", "excluding conservation_revenue"),
+  alpha   = round(c(
+    psych::alpha(method_df[, method_scales$method_contested], warnings = FALSE)$total$raw_alpha,
+    psych::alpha(method_df[, c(method_scales$method_contested, "method_dogs_predators")],
+                 warnings = FALSE)$total$raw_alpha,
+    psych::alpha(reason_df[, reason_scales$reason_utilitarian], warnings = FALSE)$total$raw_alpha,
+    psych::alpha(reason_df[, setdiff(reason_scales$reason_utilitarian,
+                                     "reason_conservation_revenue")],
+                 warnings = FALSE)$total$raw_alpha), 3)) %>%
+  ktab(caption = "Sensitivity checks on the two flagged items")
+```
+
+All five scales exceed .80, and alpha and omega agree to within .002 wherever both are defined, so tau-equivalence is a reasonable approximation.
+
+Both sensitivity checks were resolved in favor of the factor structure. Dropping `reason_conservation_revenue` lowers alpha from .819 to .778, so despite its modest loading it earns its place and is retained. Including `method_dogs_predators` *raises* `method_contested` alpha from .876 to .887, but this was not treated as evidence for inclusion: alpha increases mechanically with scale length, and a gain of .011 from a sixth item is unremarkable. The cross-loading is the substantive evidence, and the item stays out.
+
+One note on interpretation: mean inter-item correlation for `method_conventional` is .73, which is high. Bow, firearms, and dogs-for-birds are close to interchangeable in respondents' judgments, a narrow construct rather than a defective scale, and arguably a finding in itself.
+
+## Composite variables
+
+Composites are unweighted means of their constituent items, requiring responses to at least half a scale's items; respondents below that threshold are set to `NA` rather than scored from a fragment. Responses were forced for the reasons and methods blocks, so no case is affected here. The identity items permitted skips, and two cases are affected there. Standardized versions are created for the regression so coefficients are comparable across scales.
+
+```{r composites, echo=F, include=T, warning=F, message=F}
+for (nm in names(reason_scales)) personal_weights[[nm]] <- composite(personal_weights, reason_scales[[nm]])
+for (nm in names(method_scales)) personal_weights[[nm]] <- composite(personal_weights, method_scales[[nm]])
+
+composite_names <- c(names(reason_scales), names(method_scales))
+
+personal_weights <- personal_weights %>%
+  mutate(across(all_of(c(composite_names, "method_dogs_predators")),
+                ~ as.numeric(scale(.x)), .names = "{.col}_z"))
+
+comp_desc <- personal_weights %>%
+  select(all_of(composite_names)) %>%
+  pivot_longer(everything(), names_to = "Composite", values_to = "value") %>%
+  group_by(Composite) %>%
+  dplyr::summarize(
+    Mean     = mean(value, na.rm = TRUE),
+    SD       = sd(value, na.rm = TRUE),
+    Min      = min(value, na.rm = TRUE),
+    Max      = max(value, na.rm = TRUE),
+    Skew     = e1071::skewness(value, na.rm = TRUE),
+    `N miss` = sum(is.na(value)),
+    .groups  = "drop")
+
+comp_desc %>%
+  mutate(across(c(Mean, SD, Min, Max, Skew), ~ round(.x, 2))) %>%
+  ktab(caption = "Composite variables: reasons and methods")
+```
+
+Utilitarian reasons (*M* = `r desc_of(comp_desc, "reason_utilitarian", "Mean")`) and conventional methods (*M* = `r desc_of(comp_desc, "method_conventional", "Mean")`) sit above the scale midpoint; sport reasons (*M* = `r desc_of(comp_desc, "reason_sport", "Mean")`) and contested methods (*M* = `r desc_of(comp_desc, "method_contested", "Mean")`) sit below. All skew values fall within |`r fmt(max(abs(comp_desc$Skew)))`|, so no transformations are indicated, unlike `game_meat_freq` above.
+
+```{r composite correlations, echo=F, include=T, warning=F, message=F, fig.height=5.5, fig.width=6.5}
+cor_vars <- c(composite_names, "method_dogs_predators",
+              intersect(c("ID_non_consume", "ID_consum"), names(personal_weights)))
+
+comp_cor <- personal_weights %>%
+  select(all_of(cor_vars)) %>%
+  cor(use = "pairwise.complete.obs")
+
+# order by hierarchical clustering so related scales sit together
+lev <- rownames(comp_cor)[hclust(as.dist(1 - comp_cor))$order]
+
+as.data.frame(comp_cor) %>%
+  rownames_to_column("var1") %>%
+  pivot_longer(-var1, names_to = "var2", values_to = "r") %>%
+  mutate(var1    = factor(var1, levels = lev),
+         var2    = factor(var2, levels = lev),
+         lab_col = ifelse(abs(r) > 0.60, "white", "grey20")) %>%
+  ggplot(aes(var1, var2, fill = r)) +
+  geom_tile(color = "white", linewidth = 0.6) +
+  geom_text(aes(label = sprintf("%.2f", r), color = lab_col), size = 3) +
+  scale_color_identity() +
+  scale_fill_gradient2(low = "#0072B2", mid = "white", high = "#D55E00",
+                       midpoint = 0, limits = c(-1, 1), name = "r") +
+  coord_fixed() +
+  labs(x = NULL, y = NULL,
+       caption = wrap_cap("Pearson correlations, pairwise complete observations.")) +
+  theme(panel.grid = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.caption = element_text(color = "grey45", hjust = 0, size = rel(0.8)),
+        legend.position = "right")
+
+ggsave(here("figs", "composite_correlations.png"),
+       width = 6.5, height = 5.5, dpi = 300, device = agg_png)
+```
+
+The strongest associations are `reason_utilitarian` with `method_conventional` (*r* = `r cor_of(comp_cor, "reason_utilitarian", "method_conventional")`) and `reason_utilitarian` with `reason_cultural` (*r* = `r cor_of(comp_cor, "reason_utilitarian", "reason_cultural")`), both below the conventional .80 concern threshold. A pairwise correlation of that size implies a bivariate VIF near `r fmt(1 / (1 - comp_cor["reason_utilitarian", "method_conventional"]^2), 1)`; the multivariate VIF will run higher once all predictors are entered, so this is checked after fitting rather than pre-empted here. Note that the composite correlation (`r cor_of(comp_cor, "reason_utilitarian", "reason_cultural")`) is lower than the corresponding factor correlation (`r fmt(reason_efa$Phi[1, 3])`), as composites carry measurement error while latent factors are disattenuated.
+
+If collinearity does prove a problem, the options are combining the utilitarian and cultural scales, dropping one, or moving to a penalized approach, a decision to be made on theoretical grounds rather than on VIF alone.
+
+# Candidate Variables
+
+Everything derived above, assembled in one place. Not all of these enter the models: `has_hunted`, `game_meat` and the reasons and methods composites are excluded on the grounds set out under Analysis Approach below. They are described here because their exclusion is a decision a reader should be able to inspect rather than infer from an absence.
+
+This is a national sample of US adults from the VeraSight panel (n = 1,513 after cleaning), not a state-level sample. All measurement work above (factor structure, reliability) is unweighted, since those are properties of the instrument rather than of the population. From this point on, population estimates come from the survey design.
+
+## Categorical predictors
+
+Age enters as a factor rather than as band midpoints. The midpoint coding used earlier imposed linearity across unevenly spaced bands and assigned an invented value of 67 to the open-ended 65+ category. Income enters as an ordered factor for similar reasons: effects on wildlife attitudes are rarely linear in dollars.
+
+`metro` is not used. It is a coarse Metropolitan/Non-metro binary (1,314 / 183), too blunt for the rural–urban gradient that matters here; a ZIP- or county-based measure would be needed to do that properly.
+
+```{r categorical predictors, echo=F, include=T, warning=F, message=F}
+personal_weights <- personal_weights %>%
+  mutate(
+    age_group = factor(na_if(trimws(as.character(age_group4)), ""),
+                       levels = c("18-29", "30-49", "50-64", "65+")),
+    # labels drop the dollar signs deliberately: MathJax treats $...$ as inline
+    # math in the rendered HTML and swallows the label text
+    income_cat = factor(na_if(trimws(as.character(income)), ""),
+                        levels = c("Less than $15,000",
+                                   "$15,000 to under $50,000",
+                                   "$50,000 to under $75,000",
+                                   "$75,000 to under $100,000",
+                                   "$100,000 to under $150,000",
+                                   "$150,000 to under $200,000",
+                                   "More than $200,000"),
+                        labels = c("Under 15k", "15-50k", "50-75k", "75-100k",
+                                   "100-150k", "150-200k", "200k+")))
+
+personal_weights %>% count(age_group) %>% ktab(caption = "Age band")
+personal_weights %>% count(income_cat) %>% ktab(caption = "Household income")
+```
+
+## Variable set and standardization
+
+Predictors sit on incompatible scales: `political_ideology` runs 0–100, the WVO scales 1–7, the composites 1–5, so raw coefficients would not be comparable. All continuous predictors are z-scored. Outcomes stay on their original 1–5 scale so coefficients read as scale points per standard deviation of predictor.
+
+```{r variable sets, echo=F, include=T, warning=F, message=F}
+outcome_vars <- c("hunting_support", "trapping_support")
+
+continuous_vars <- c(
+  "political_ideology", "wvo_mutualism", "wvo_domination",
+  "christian_nationalism_score",
+  "ID_consum", "ID_non_consume",
+  "reason_utilitarian", "reason_sport", "reason_cultural",
+  "method_contested", "method_conventional", "method_dogs_predators")
+
+binary_vars <- c("female", "college_grad", "eats_meat_n",
+                 "has_hunted", "knows_hunter", "has_pets_n", "game_meat")
+
+factor_vars <- c("age_group", "income_cat")
+
+model_vars <- c(outcome_vars, continuous_vars, binary_vars, factor_vars)
+
+# fail loudly rather than silently dropping something.
+# cat() rather than warning() because these chunks run with warning = F.
+missing_vars <- setdiff(model_vars, names(personal_weights))
+if (length(missing_vars) > 0) {
+  cat("!! NOT FOUND in personal_weights:", paste(missing_vars, collapse = ", "), "\n")
+} else {
+  cat("All", length(model_vars), "model variables present.\n")
+}
+
+personal_weights <- personal_weights %>%
+  mutate(across(all_of(continuous_vars), ~ as.numeric(scale(.x)), .names = "{.col}_z"))
+
+continuous_z <- paste0(continuous_vars, "_z")
+
+design <- personal_weights %>%
+  as_survey_design(ids = 1, weights = weight)
+```
+
+## Descriptives, unweighted and weighted
+
+```{r weighted descriptives, echo=F, include=T, warning=F, message=F}
+unweighted_stats <- personal_weights %>%
+  select(any_of(c(outcome_vars, continuous_vars, binary_vars))) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "value") %>%
+  filter(!is.na(value)) %>%
+  group_by(variable) %>%
+  dplyr::summarize(n         = n(),
+                   mean_unwt = mean(value),
+                   sd_unwt   = sd(value),
+                   .groups   = "drop")
+
+weighted_stats <- map_dfr(c(outcome_vars, continuous_vars, binary_vars), function(v) {
+  design %>%
+    dplyr::summarize(mean_wt = survey_mean(!!sym(v), na.rm = TRUE, vartype = NULL),
+                     var_wt  = survey_var(!!sym(v),  na.rm = TRUE, vartype = NULL)) %>%
+    mutate(variable = v, sd_wt = sqrt(var_wt)) %>%
+    select(variable, mean_wt, sd_wt)
+})
+
+var_role <- tibble(
+  variable = c(outcome_vars, continuous_vars, binary_vars),
+  role     = c(rep("Outcome", length(outcome_vars)),
+               rep("Continuous predictor", length(continuous_vars)),
+               rep("Binary predictor", length(binary_vars))))
+
+unweighted_stats %>%
+  left_join(weighted_stats, by = "variable") %>%
+  left_join(var_role, by = "variable") %>%
+  mutate(across(c(mean_unwt, sd_unwt, mean_wt, sd_wt), ~ round(.x, 2)),
+         role = factor(role, levels = c("Outcome", "Continuous predictor",
+                                        "Binary predictor")),
+         diff = round(mean_wt - mean_unwt, 2)) %>%
+  arrange(role, variable) %>%
+  select(role, variable, n,
+         `Mean (unwt)` = mean_unwt, `SD (unwt)` = sd_unwt,
+         `Mean (wt)`   = mean_wt,   `SD (wt)`   = sd_wt,
+         Diff          = diff) %>%
+  ktab(caption = paste("Candidate variables, unweighted and design-weighted.",
+                       "Diff is the weighted minus unweighted mean; large values",
+                       "flag characteristics associated with under- or",
+                       "over-representation in the raw sample. Not all of these",
+                       "enter the models."))
+
+map_dfr(factor_vars, function(v) {
+  unwt <- personal_weights %>%
+    filter(!is.na(.data[[v]])) %>%
+    count(level = .data[[v]]) %>%
+    mutate(variable = v, pct_unwt = round(100 * n / sum(n), 1))
+
+  wt <- design %>%
+    filter(!is.na(!!sym(v))) %>%
+    group_by(level = !!sym(v)) %>%
+    dplyr::summarize(pct_wt = survey_prop(vartype = NULL)) %>%
+    mutate(pct_wt = round(100 * pct_wt, 1))
+
+  left_join(unwt, wt, by = "level") %>%
+    select(variable, level, n, pct_unwt, pct_wt)
+}) %>%
+  ktab(caption = "Categorical predictors: unweighted and design-weighted percentages")
+```
+
+The `Diff` column is the thing to read closely. Where the weighted and unweighted means diverge, the panel over- or under-represents that characteristic relative to the population, and any unweighted estimate of it above should be read with that in mind.
+
+Models from this point use `design`, not `personal_weights`. Fitting `MASS::polr()` or `lm()` on the raw frame would silently discard the weights.
+
+
+```{r regression setup, echo=F, include=F, warning=F, message=F}
+library(MASS)   # svyolr; loaded HERE, not in setup — MASS::select masks dplyr::select
+library(car)    # vif
+
+blocks <- list(
+  demographics = c("age_group", "income_cat", "female", "college_grad",
+                   "has_pets_n", "eats_meat_n"),
+  exposure     = c("knows_hunter"),
+  # Two distinct construct families, entered as separate blocks. No claim is
+  # made that either precedes the other — they are different kinds of thing,
+  # not different levels of one hierarchy.
+  ideological = c("political_ideology_z", "christian_nationalism_score_z"),
+  wvo            = c("wvo_mutualism_z", "wvo_domination_z"),
+  identity       = c("ID_consum_z", "ID_non_consume_z"))
+
+# both families act as antecedents in the mediation models
+antecedent_terms <- c(blocks$ideological, blocks$wvo)
+
+all_predictors <- unlist(blocks, use.names = FALSE)
+
+build_formula <- function(dv, preds) {
+  f <- as.formula(paste(dv, "~", paste(preds, collapse = " + ")))
+  environment(f) <- globalenv()   # keep lookup predictable inside bootstraps
+  f
+}
+
+r2_svyglm <- function(m) 1 - (m$deviance / m$null.deviance)
+ic_value  <- function(m) { v <- AIC(m); if (length(v) > 1) unname(v[["AIC"]]) else unname(v) }
+bic_value <- function(m, maximal) {
+  v <- tryCatch(BIC(m, maximal = maximal), error = function(e) NA_real_)
+  if (length(v) > 1) unname(v[["BIC"]]) else unname(v)
+}
+stars <- function(p) case_when(p < .001 ~ "***", p < .01 ~ "**",
+                               p < .05 ~ "*", TRUE ~ "")
+
+tidy_svyglm <- function(m) {
+  s <- summary(m)$coefficients
+  tibble(term = rownames(s), estimate = s[, 1], se = s[, 2], p = s[, 4]) %>%
+    filter(term != "(Intercept)")
+}
+
+# -- inline reporting helpers -------------------------------------------------
+# Every number quoted in the prose below is pulled through one of these, so the
+# text cannot drift from the tables when the analysis is re-run.
+b_of  <- function(m, term, d = 3) sprintf(paste0("%.", d, "f"), coef(m)[[term]])
+r2_of <- function(m, d = 3) sprintf(paste0("%.", d, "f"), r2_svyglm(m))
+pc_of <- function(m, d = 1) sprintf(paste0("%.", d, "f"), 100 * r2_svyglm(m))
+n_fmt <- function(x) format(x, big.mark = ",")
+
+# complete cases, so nested models are comparable
+model_cc  <- personal_weights %>%
+  filter(if_all(all_of(c(outcome_vars, all_predictors)), ~ !is.na(.)))
+design_cc <- model_cc %>% as_survey_design(ids = 1, weights = weight)
+
+# NOT named `w` — a global `w` is picked up by lm(weights = w) in the bootstrap
+wts       <- model_cc$weight
+wt_cv     <- sprintf("%.2f", sd(wts) / mean(wts))
+wt_ratio  <- sprintf("%.1f", max(wts) / min(wts))
+kish_n    <- n_fmt(round(sum(wts)^2 / sum(wts^2)))
+kish_deff <- sprintf("%.2f", length(wts) * sum(wts^2) / sum(wts)^2)
+n_cc      <- n_fmt(nrow(model_cc))
+n_params  <- length(all_predictors) + 3   # factors expand: age 3 df, income 6 df
+```
+
+# Analysis Approach
+
+## Estimation
+
+All models are design-based, fitted with `svyglm()` on the survey design object, so standard errors are Taylor-linearised sandwich estimators that account for the weighting. The panel weights are moderate in spread (CV = `r wt_cv`, max/min ratio `r wt_ratio`), giving a design effect of `r kish_deff` and a Kish effective sample size of `r kish_n` against `r n_cc` complete cases. That effective *n* is what precision actually rests on and is the figure reported.
+
+## Specification and causal ordering
+
+Predictors enter in four blocks reflecting an assumed causal sequence:
+
+**demographics → exposure → values → identity → support**
+
+Blocks are cumulative, and the increment in R² at each step indicates what that construct adds beyond those preceding it. The ordering follows the cognitive hierarchy: stable characteristics and social context precede general orientations, which precede identification, which precedes attitudes toward specific practices.
+
+Two distinct construct families are entered as separate blocks. **Wildlife value orientations** (mutualism and domination) are domain-specific orientations toward wildlife. **Ideological orientations** (political ideology and Christian nationalism) are general worldview measures with no specific wildlife content. They are kept apart because they are different kinds of construct and because their incremental contributions are worth seeing separately. No claim is made that either family precedes the other: the cognitive hierarchy would place general values ahead of domain-specific orientations, which would make wildlife value orientations a mediator of ideology, but cross-sectional data cannot establish that ordering and the analysis does not assume it.
+
+Two sets of variables available in the data are deliberately excluded, and the exclusions matter enough to state directly.
+
+**Prior hunting participation (`has_hunted`) is not a predictor.** Having hunted is plausibly a *consequence* of supporting hunting rather than a cause of it. Conditioning on a descendant of the outcome biases the coefficients of every other predictor toward zero. In an earlier specification that included it, the identity block's contribution fell almost to nothing, an artifact of controlling for a variable lying downstream of the construct being tested. Participation is better treated as an outcome in its own right, which is left to later analysis.
+
+**The reasons and methods scales are not predictors either.** Rating particular reasons for hunting as acceptable, or particular methods as acceptable, is closer to a restatement of hunting support than to an antecedent of it. Including them inflated explained variance substantially, most of it definitional rather than explanatory. Their removal also resolves a specific circularity: the `method_contested` scale contains both `method_trapping` and `method_neck_snares`, so using it to predict trapping support would have meant predicting the outcome partly from itself.
+
+**Eating game meat (`game_meat`) is excluded on the same grounds.** Consuming game meat requires either hunting or close social ties to someone who does, together with a willingness to eat it, and declining offered game meat is itself an expression of attitude. It is a marker of the disposition being measured rather than a cause of it, and holding it out while excluding `has_hunted` for the same reason is the only consistent position.
+
+The empirical case reinforces the theoretical one. Entered alone, `game_meat` appears to be a powerful predictor, but most of that power is shared with the constructs of interest rather than unique to it: removing it from the full model costs far less variance than adding it alone gains. More importantly, its presence *suppresses* the predictors of theoretical interest. Controlling for it reduced the consumptive identity coefficient by roughly a quarter and rendered the direct effect of Christian nationalism non-significant, both artifacts of conditioning on a variable that lies downstream of them. The specification reported here excludes it; the appendix reports the alternative.
+
+`knows_hunter` **is retained as exposure.** Unlike hunting, eating game meat, or endorsing particular methods, knowing a hunter is largely not chosen; it follows from where someone grew up and who is around them, and it could plausibly increase or decrease support depending on what that acquaintance conveys. That makes it a genuine test rather than a definitional one.
+
+## Mediation
+
+The cognitive hierarchy holds that general orientations shape more specific cognitions, which in turn shape attitudes toward particular practices. If that ordering is right, some of the association between these orientations and support for hunting or trapping should run *through* how people identify rather than around it. The mediation analysis tests that directly.
+
+Both antecedent families (wildlife value orientations and ideological orientations) are treated as predictors whose effects may be transmitted through identity.
+
+### What is estimated
+
+Three quantities are involved, following standard mediation notation:
+
+- the **total effect** (*c*), from a model containing the antecedent orientations but not identity
+- the **direct effect** (*c'*), from a model containing both
+- the **indirect effect**, the portion of the total that operates through identity
+
+The indirect effect is estimated as *c* − *c'*. In linear models with continuous mediators this is algebraically identical to the product-of-coefficients estimate *a* × *b*, where *a* is the path from an antecedent orientation to identity and *b* the path from identity to support (MacKinnon, Warsi & Dwyer, 1995). The *a*-paths are reported separately so the mechanism is visible rather than only its product.
+
+### Why not the causal-steps procedure
+
+The familiar Baron and Kenny (1986) approach declares mediation when a sequence of significance tests is satisfied: the total effect must be significant, the *a*- and *b*-paths must be significant, and the direct effect must shrink. That procedure has been superseded. It has low statistical power, it produces a verdict rather than an estimate, and its requirement of a significant total effect wrongly excludes inconsistent and suppression mediation, cases where direct and indirect paths run in opposite directions and partly cancel.
+
+Current practice is to estimate the indirect effect as a quantity and place a confidence interval around it, which is what is done here. The indirect effect is not assumed to be normally distributed; it is a product of coefficients and is typically skewed, which is also why the Sobel test is avoided.
+
+### Why not structural equation modeling
+
+SEM would be the stronger design in one respect. Identity could be specified as a latent variable measured by the nine items rather than as an observed composite, removing measurement-error attenuation from the *a*- and *b*-paths. The indirect effects reported here are conservative for that reason.
+
+Two considerations weigh against it. Survey-weighted SEM with replicate-weight resampling is awkward to implement and harder for readers to verify. More substantively, the identity measurement model fits only marginally (see above), so a latent specification would carry that misfit into the structural model, and the analysis would become an argument about fit indices rather than about mediation.
+
+### Inference
+
+Confidence intervals come from **500 survey bootstrap replicate weights**. A conventional case-resampling bootstrap, as implemented in widely used mediation macros, ignores the sampling design and would understate uncertainty on weighted data. Replicate-weight resampling reproduces the design at each iteration, so the intervals reflect both sampling variability and the weighting.
+
+### Scope of the estimate
+
+Both identity composites enter the mediator model together, so *c* − *c'* is the **joint** indirect effect through identity as a whole rather than a decomposition by mediator. Attribution to one composite or the other rests on the *a*-paths, which are reported in full.
+
+```{r hypothesised model, echo=F, include=T, warning=F, message=F, fig.height=4.6, fig.width=8, fig.alt="Conceptual path diagram. On the left, two wildlife value orientations (mutualism, domination) and two ideological orientations (political ideology, Christian nationalism) are shown as separate groups. Arrows run from each to two identity constructs in the middle, which in turn have arrows to support on the right. Curved arrows also run directly from each orientation to support, bypassing identity."}
+# Node layout shared by the conceptual and results figures, so the two are
+# directly comparable.
+nodes <- tribble(
+  ~node,                            ~label,                     ~x,  ~y,  ~block,
+  "wvo_domination_z",               "Domination",                1,  4.6, "WVO",
+  "wvo_mutualism_z",                "Mutualism",                 1,  3.5, "WVO",
+  "christian_nationalism_score_z",  "Christian\nnationalism",    1,  1.6, "Ideological",
+  "political_ideology_z",           "Political\nideology",       1,  0.4, "Ideological",
+  "ID_consum_z",                    "Consumptive\nidentity",     3,  3.4, "Identity",
+  "ID_non_consume_z",               "Non-consumptive\nidentity", 3,  1.4, "Identity",
+  "outcome",                        "Support",                   5,  2.4, "Outcome")
+
+node_xy <- nodes %>% dplyr::select(node, x, y)
+
+# family headings, so the two antecedent groups read as distinct kinds of
+# construct rather than one undifferentiated column
+family_labs <- tribble(
+  ~x,  ~y,   ~label,                        ~block,
+  1,   5.35, "Wildlife value orientations",  "WVO",
+  1,   -0.4, "Ideological orientations", "Ideological")
+
+edge_frame <- function(edges) {
+  edges %>%
+    left_join(node_xy, by = c("from" = "node")) %>%
+    rename(x = x, y = y) %>%
+    left_join(node_xy, by = c("to" = "node"), suffix = c("", "end")) %>%
+    rename(xend = xend, yend = yend)
+}
+
+antecedent_nodes <- nodes$node[nodes$block %in% c("WVO", "Ideological")]
+
+hyp_edges <- bind_rows(
+  expand_grid(from = antecedent_nodes,
+              to   = nodes$node[nodes$block == "Identity"]) %>% mutate(kind = "a"),
+  expand_grid(from = nodes$node[nodes$block == "Identity"],
+              to   = "outcome") %>% mutate(kind = "b"),
+  expand_grid(from = antecedent_nodes,
+              to   = "outcome") %>% mutate(kind = "direct")) %>%
+  left_join(node_xy, by = c("from" = "node")) %>%
+  left_join(node_xy, by = c("to" = "node"), suffix = c("", "end"))
+
+# Three dials for the direct-path arcs:
+#   CURVATURE  how far the arcs bow away from the identity boxes
+#   LAB_FRAC   where along the arc the labels sit (0.5 = midpoint)
+#   LAB_LIFT   how far the labels sit off the chord relative to the arc itself.
+#              1.0 is the geometric arc position; grid's curveGrob bows slightly
+#              less than the quadratic approximation used here, so values above
+#              1 are needed to lift labels onto the line rather than under it.
+# equal magnitude, opposite sign: upper paths arc over, lower paths arc under
+CURVATURE      <- -0.46   # paths from the upper (WVO) group
+DOWN_CURVATURE <-  0.46   # paths from the lower (ideological) group
+LAB_FRAC       <-  0.38
+LAB_LIFT       <-  1.45
+
+# geom_curve draws an arc, but the chord between its endpoints does not lie on
+# it. Labels placed on the chord float off their own path.
+# Per-path vertical nudges, in data units, for the one or two labels that need
+# individual clearance. Everything not listed here gets 0.
+LAB_NUDGE_Y <- c(wvo_domination_z = 0.18)
+
+arc_label_xy <- function(df, curvature = CURVATURE, frac = LAB_FRAC,
+                         lift = LAB_LIFT) {
+  dx <- df$xend - df$x
+  dy <- df$yend - df$y
+  # Negative curvature bows the arc to the LEFT of the direction of travel,
+  # i.e. along the counter-clockwise perpendicular (-dy, dx), so the offset is
+  # +curvature*dy on x and -curvature*dx on y.
+  #
+  # The offset also has to taper: greatest at the midpoint, zero at both ends,
+  # following 4*t*(1-t). Without it, moving a label along the chord slides it
+  # off the curve.
+  taper <- 4 * frac * (1 - frac) * 0.5 * lift
+  df %>%
+    mutate(lab_x = x + frac * dx + curvature * taper * dy,
+           lab_y = y + frac * dy - curvature * taper * dx +
+                   coalesce(unname(LAB_NUDGE_Y[from]), 0))
+}
+
+path_plot <- function(edge_df, node_df, subtitle = NULL, show_labels = FALSE,
+                      split_curves = FALSE) {
+  through <- edge_df %>% filter(kind != "direct")
+
+  direct <- edge_df %>%
+    filter(kind == "direct") %>%
+    left_join(node_df %>% dplyr::select(node, from_block = block),
+              by = c("from" = "node"))
+
+  # split_curves is for the hypothesised figure only, where all eight direct
+  # paths are drawn and arcing them all the same way crowds the top. Paths from
+  # the upper (WVO) group bow over the identity boxes, those from the lower
+  # (ideological) group bow under. The results figure draws far fewer paths and
+  # reads better with a single direction, so it leaves this off.
+  if (split_curves) {
+    direct_up   <- direct %>% filter(from_block != "Ideological")
+    direct_down <- direct %>% filter(from_block == "Ideological")
+  } else {
+    direct_up   <- direct
+    direct_down <- direct[0, ]
+  }
+
+  curve_layer <- function(d, curv) {
+    geom_curve(data = d, aes(x = x, y = y, xend = xend, yend = yend),
+               curvature = curv, color = "grey50", linewidth = 0.4,
+               arrow = arrow(length = unit(0.14, "cm"), type = "closed"))
+  }
+
+  p <- ggplot() +
+    curve_layer(direct_up,   CURVATURE) +
+    curve_layer(direct_down, DOWN_CURVATURE) +
+    geom_segment(data = through,
+                 aes(x = x, y = y, xend = xend, yend = yend),
+                 color = "black", linewidth = 0.5,
+                 arrow = arrow(length = unit(0.14, "cm"), type = "closed"))
+
+  if (show_labels) {
+    p <- p +
+      geom_label(data = through,
+                 aes(x = (x + xend) / 2, y = (y + yend) / 2, label = lab),
+                 size = 2.7, label.size = 0, fill = "white", color = "black") +
+      geom_label(data = arc_label_xy(direct_up, curvature = CURVATURE),
+                 aes(x = lab_x, y = lab_y, label = lab),
+                 size = 2.5, label.size = 0, fill = "white", color = "grey40") +
+      geom_label(data = arc_label_xy(direct_down, curvature = DOWN_CURVATURE),
+                 aes(x = lab_x, y = lab_y, label = lab),
+                 size = 2.5, label.size = 0, fill = "white", color = "grey40")
+  }
+
+  p +
+    geom_label(data = node_df,
+               aes(x = x, y = y, label = label, color = block),
+               size = 3, label.padding = unit(0.4, "lines"),
+               label.r = unit(0.25, "lines"), fill = "white", lineheight = 0.95) +
+    geom_text(data = family_labs, aes(x = x, y = y, label = label, color = block),
+              size = 2.9, fontface = "bold", family = fam) +
+    scale_color_manual(values = c(WVO = okabe_ito[1], Ideological = okabe_ito[3],
+                                  Identity = okabe_ito[2], Outcome = "black")) +
+    # asymmetric: the family headings are centered on the left column and are
+    # wider than the node boxes, so they need extra room on that side
+    scale_x_continuous(expand = expansion(mult = c(0.30, 0.14))) +
+    scale_y_continuous(expand = expansion(mult = 0.26)) +   # arcs bow further now
+    labs(subtitle = subtitle) +
+    theme_void(base_size = 11, base_family = fam) +
+    theme(legend.position = "none",
+          plot.subtitle = element_text(color = "grey35", hjust = 0),
+          plot.caption  = element_text(color = "grey45", hjust = 0, size = rel(0.8)))
+}
+
+hyp_plot <- path_plot(hyp_edges, nodes, split_curves = TRUE) +
+  labs(caption = wrap_cap(c("Hypothesised model. Straight arrows are paths through",
+                            "identity (a and b); curved grey arrows are direct paths",
+                            "from the antecedent orientations to support.")))
+
+hyp_plot
+
+ggsave(here("figs", "path_model_hypothesised.png"), hyp_plot,
+       width = 8, height = 4.6, dpi = 300, device = agg_png)
+```
+
+## No model selection on significance
+
+Every predictor entered is reported, significant or not. No stepwise procedure or significance filter is applied. Stepwise selection inflates Type I error among the predictors that survive, biases their coefficients away from zero, and yields standard errors that ignore the selection step, leaving reported *p*-values uninterpretable. With `r n_cc` complete cases against `r n_params` parameters there is no power constraint that would justify trimming. Blocks are dropped only on stated theoretical grounds, as described above.
+
+The choice of linear over ordinal models is also empirical, and is set out below once the relevant diagnostic is in hand.
+
+# Regression Diagnostics
+
+```{r listwise n, echo=F, include=T, warning=F, message=F}
+# reported here rather than in the candidate-variables section, because only
+# now is the actual modeling set defined
+tibble(`Total respondents`               = nrow(personal_weights),
+       `Complete on all model variables` = nrow(model_cc),
+       `Lost to listwise deletion`       = nrow(personal_weights) - nrow(model_cc),
+       `Percent retained`                = round(100 * nrow(model_cc) /
+                                                 nrow(personal_weights), 1)) %>%
+  ktab(caption = "Effective sample size under listwise deletion")
+```
+
+```{r weight diagnostics, echo=F, include=T, warning=F, message=F}
+tibble(n               = length(wts),
+       min             = round(min(wts), 3),
+       max             = round(max(wts), 3),
+       `max/min`       = as.numeric(wt_ratio),
+       `CV of weights` = as.numeric(wt_cv),
+       `Kish eff. n`   = kish_n,
+       `Design effect` = as.numeric(kish_deff)) %>%
+  ktab(caption = "Weight distribution and Kish effective sample size")
+
+dm <- svymean(~ hunting_support + trapping_support, design_cc, deff = TRUE)
+tibble(variable = names(coef(dm)),
+       mean     = round(as.numeric(coef(dm)), 3),
+       SE       = round(as.numeric(SE(dm)), 3),
+       deff     = round(as.numeric(deff(dm)), 3)) %>%
+  ktab(caption = "Design effects on the outcome means")
+```
+
+```{r collinearity, echo=F, include=T, warning=F, message=F}
+# VIF is a property of the design matrix, so computed on an unweighted lm over
+# the same cases. GVIF^(1/(2*df)) squared is comparable to the usual VIF scale.
+vif_fit <- lm(build_formula("hunting_support", all_predictors), data = model_cc)
+
+vif_tbl <- as.data.frame(vif(vif_fit)) %>%
+  rownames_to_column("term") %>%
+  setNames(c("term", "GVIF", "df", "GVIF_adj")) %>%
+  mutate(`VIF equivalent` = round(GVIF_adj^2, 2)) %>%
+  arrange(desc(`VIF equivalent`))
+
+vif_tbl %>%
+  dplyr::select(term, df, `VIF equivalent`) %>%
+  ktab(caption = paste("Collinearity. VIF equivalent above 5 warrants attention;",
+                       "above 10 is a problem."))
+
+X  <- model.matrix(build_formula("hunting_support", all_predictors), data = model_cc)
+Xs <- scale(X, center = FALSE, scale = sqrt(colSums(X^2)))
+sv <- svd(Xs)$d
+
+tibble(component       = seq_along(sv),
+       condition_index = round(max(sv) / sv, 1)) %>%
+  slice_max(condition_index, n = 5) %>%
+  ktab(caption = paste0("Five largest condition indices (condition number = ",
+                        round(max(sv) / min(sv), 1),
+                        "). Above 30 indicates a serious near-dependency."))
+
+cd   <- cooks.distance(vif_fit)
+hats <- hatvalues(vif_fit)
+p_k  <- length(coef(vif_fit))
+
+tibble(`Cook's D > 4/n`         = sum(cd > 4 / nrow(model_cc), na.rm = TRUE),
+       `Cook's D > 1`           = sum(cd > 1, na.rm = TRUE),
+       `Max Cook's D`           = round(max(cd, na.rm = TRUE), 3),
+       `High leverage (> 2p/n)` = sum(hats > 2 * p_k / nrow(model_cc), na.rm = TRUE)) %>%
+  ktab(caption = "Influence diagnostics. Cook's D above 1 is the level that matters.")
+
+max_vif  <- sprintf("%.2f", max(vif_tbl$`VIF equivalent`))
+cond_num <- sprintf("%.1f", max(sv) / min(sv))
+max_cook <- sprintf("%.3f", max(cd, na.rm = TRUE))
+pct_4n   <- sprintf("%.0f", 100 * mean(cd > 4 / nrow(model_cc), na.rm = TRUE))
+```
+
+Collinearity is not a concern: the largest VIF equivalent is `r max_vif` and the condition number is `r cond_num`, well below the threshold of 30. No case is influential: the maximum Cook's distance is `r max_cook`, far below 1. Cases exceeding the 4/*n* rule number about `r pct_4n`%, which is roughly what that deliberately over-sensitive threshold produces by chance.
+
+Heteroskedasticity and residual-normality tests are not reported. Design-based standard errors are already robust sandwich estimators, so testing for non-constant variance and then applying a correction already in use would be redundant; and normality tests on a bounded 5-point outcome at this sample size reject by construction.
+
+## Why linear rather than ordinal models
+
+```{r proportional odds, echo=F, include=T, warning=F, message=F}
+po_check <- function(dv, design_obj, preds) {
+  map_dfr(2:5, function(k) {
+    d <- design_obj %>% mutate(.y = as.numeric(!!sym(dv) >= k))
+    m <- svyglm(build_formula(".y", preds), design = d, family = quasibinomial())
+    tidy_svyglm(m) %>% mutate(cut = paste0(">= ", k))
+  }) %>%
+    dplyr::select(term, cut, estimate) %>%
+    pivot_wider(names_from = cut, values_from = estimate)
+}
+
+po_hunt <- po_check("hunting_support",  design_cc, all_predictors)
+po_trap <- po_check("trapping_support", design_cc, all_predictors)
+
+po_hunt %>% mutate(across(where(is.numeric), ~ round(.x, 2))) %>%
+  ktab(caption = "Proportional odds check, hunting support: logit coefficients at each cut point")
+po_trap %>% mutate(across(where(is.numeric), ~ round(.x, 2))) %>%
+  ktab(caption = "Proportional odds check, trapping support")
+
+# pull specific rows for the prose below
+po_row <- function(tbl, term) {
+  v <- tbl %>% filter(term == !!term) %>% dplyr::select(-term) %>% unlist()
+  paste(sprintf("%.2f", v), collapse = ", ")
+}
+```
+
+Both outcomes are 5-point ordered scales, and proportional-odds models are increasingly the default for such data. Treating them as interval therefore needs an argued defense, and the defense here is empirical.
+
+The proportional-odds assumption does not hold. Fitting separate binary logistic models at each of the four cut points yields coefficients that differ systematically across the response scale. For hunting support, `knows_hunter` runs `r po_row(po_hunt, "knows_hunter")`, disappearing and reversing at the top; `ID_consum_z` runs `r po_row(po_hunt, "ID_consum_z")`, growing several-fold; and `wvo_mutualism_z` runs `r po_row(po_hunt, "wvo_mutualism_z")`. A single odds ratio per predictor would average over effects that differ in magnitude, and in one case in direction. The ordinal model does not fail visibly in this situation; it reports an average that describes no region of the scale well.
+
+A partial proportional odds model would be the statistically preferable remedy, but no survey-weighted implementation is readily available, and abandoning the design weights to obtain the correct link function would be the worse trade. Ordinal models are therefore reported alongside the linear models as a robustness check: where the two agree in sign and significance, the interval approximation is doing no harm.
+
+The `knows_hunter` pattern is substantively interesting in its own right, and is taken up in the results.
+
+# Results
+
+```{r fit models, echo=F, include=T, warning=F, message=F}
+fit_blocks <- function(dv, design_obj) {
+  cumulative <- Reduce(c, blocks, accumulate = TRUE)
+  map(cumulative, ~ svyglm(build_formula(dv, .x), design = design_obj)) %>%
+    setNames(names(blocks))
+}
+
+hunt_models <- fit_blocks("hunting_support",  design_cc)
+trap_models <- fit_blocks("trapping_support", design_cc)
+
+hunt_lin <- hunt_models[[length(hunt_models)]]
+trap_lin <- trap_models[[length(trap_models)]]
+
+block_table <- function(dv, models) {
+  r2      <- map_dbl(models, r2_svyglm)
+  maximal <- models[[length(models)]]
+  tibble(Step       = seq_along(models),
+         Block      = paste0("+ ", names(models)),
+         k          = map_int(models, ~ length(coef(.x)) - 1L),
+         R2         = round(r2, 3),
+         `Delta R2` = round(c(r2[1], diff(r2)), 3),
+         AIC        = round(map_dbl(models, ic_value), 1),
+         BIC        = round(map_dbl(models, bic_value, maximal = maximal), 1)) %>%
+    ktab(caption = paste0("Hierarchical regression on ", dv,
+                          " (design-weighted, cumulative blocks)"))
+}
+
+block_table("hunting_support",  hunt_models)
+block_table("trapping_support", trap_models)
+
+d_r2 <- function(models, block) {
+  r2 <- map_dbl(models, r2_svyglm)
+  i  <- which(names(models) == block)
+  sprintf("%.3f", if (i == 1) r2[1] else r2[i] - r2[i - 1])
+}
+```
+
+The full models account for `r pc_of(hunt_lin)`% of variance in hunting support and `r pc_of(trap_lin)`% in trapping support. Every block improves both AIC and BIC, including identity, which is worth noting because BIC penalizes complexity most heavily, so a block surviving it is earning its place rather than fitting noise.
+
+```{r ordinal models, echo=F, include=T, warning=F, message=F}
+design_ord <- model_cc %>%
+  mutate(across(all_of(outcome_vars), ~ factor(.x, ordered = TRUE))) %>%
+  as_survey_design(ids = 1, weights = weight)
+
+hunt_ord <- svyolr(build_formula("hunting_support",  all_predictors), design = design_ord)
+trap_ord <- svyolr(build_formula("trapping_support", all_predictors), design = design_ord)
+
+tidy_svyolr <- function(m) {
+  s    <- summary(m)$coefficients
+  keep <- rownames(s)[seq_len(length(coef(m)))]
+  tibble(term = keep, estimate = s[keep, 1], se = s[keep, 2]) %>%
+    mutate(p = 2 * pnorm(abs(estimate / se), lower.tail = FALSE))
+}
+```
+
+```{r mediation, echo=F, include=T, warning=F, message=F}
+value_terms <- antecedent_terms
+
+# built from a plain svydesign: as.svrepdesign() on a tbl_svy can return
+# replicate weights that do not vary, producing silent zero standard errors
+rep_design <- as.svrepdesign(
+  svydesign(ids = ~ 1, weights = ~ weight, data = model_cc),
+  type = "bootstrap", replicates = 500)
+
+stopifnot(mean(apply(weights(rep_design, type = "analysis"), 1, sd)) > 0)
+
+indirect_tbl <- function(dv) {
+  f_total  <- build_formula(dv, c(blocks$demographics, blocks$exposure, antecedent_terms))
+  f_direct <- build_formula(dv, c(blocks$demographics, blocks$exposure,
+                                  antecedent_terms, blocks$identity))
+
+  # replicate weights attached to the data frame, not passed by name: lm()
+  # resolves `weights` inside `data` first, so no unrelated object can capture it
+  boot <- withReplicates(rep_design, function(w, data) {
+    data$.repw <- w
+    coef(lm(f_total,  data = data, weights = .repw))[value_terms] -
+    coef(lm(f_direct, data = data, weights = .repw))[value_terms]
+  })
+
+  m_tot <- svyglm(f_total,  design = design_cc)
+  m_dir <- svyglm(f_direct, design = design_cc)
+
+  tibble(predictor = value_terms,
+         total     = round(coef(m_tot)[value_terms], 3),
+         direct    = round(coef(m_dir)[value_terms], 3),
+         indirect  = round(as.numeric(coef(boot)), 3),
+         se        = round(as.numeric(SE(boot)), 3)) %>%
+    mutate(ci_low   = indirect - 1.96 * se,
+           ci_high  = indirect + 1.96 * se,
+           mediated = ifelse(ci_low > 0 | ci_high < 0, "yes", "no"),
+           `95% CI` = paste0("[", round(ci_low, 3), ", ", round(ci_high, 3), "]"),
+           `% of total` = ifelse(mediated == "yes",
+                                 paste0(round(100 * indirect / total), "%"), "")) %>%
+    dplyr::select(predictor, total, direct, indirect, se, `95% CI`,
+                  mediated, `% of total`)
+}
+
+set.seed(42)
+med_hunt <- indirect_tbl("hunting_support")
+med_trap <- indirect_tbl("trapping_support")
+
+med_hunt %>% ktab(caption = "Indirect effects through identity: hunting support")
+med_trap %>% ktab(caption = "Indirect effects through identity: trapping support")
+
+apaths <- map_dfr(blocks$identity, function(m) {
+  fit <- svyglm(build_formula(m, c(blocks$demographics, blocks$exposure,
+                                   antecedent_terms)), design = design_cc)
+  tidy_svyglm(fit) %>%
+    filter(term %in% value_terms) %>%
+    mutate(mediator = m)
+})
+
+apaths %>%
+  mutate(b = paste0(round(estimate, 3), stars(p))) %>%
+  dplyr::select(mediator, term, b, se) %>%
+  ktab(caption = "a-paths: values predicting the identity composites")
+
+# The two identity composites share a dominant general factor (omega_h = .77,
+# r = .58), so a predictor of one shows a weak association with the other purely
+# through shared variance. Re-estimating the non-consumptive a-paths with
+# consumptive identity controlled isolates the specific component.
+apaths_ctrl <- svyglm(
+  build_formula("ID_non_consume_z",
+                c("ID_consum_z", antecedent_terms, blocks$demographics,
+                  blocks$exposure)),
+  design = design_cc)
+
+tidy_svyglm(apaths_ctrl) %>%
+  filter(term %in% antecedent_terms) %>%
+  mutate(b = paste0(round(estimate, 3), stars(p))) %>%
+  dplyr::select(term, b, se) %>%
+  ktab(caption = paste("Non-consumptive identity with consumptive identity",
+                       "controlled: the specific component, net of the general",
+                       "identification factor."))
+
+ap_ctrl <- function(term) {
+  fmt(tidy_svyglm(apaths_ctrl)$estimate[tidy_svyglm(apaths_ctrl)$term == term], 3)
+}
+
+# Evidence that the four antecedents are empirically distinct rather than one
+# underlying dimension: how strongly they intercorrelate, and their VIFs in the
+# full model.
+ant_cor   <- cor(model_cc[, antecedent_terms], use = "pairwise.complete.obs")
+ant_max_r <- max(abs(ant_cor[lower.tri(ant_cor)]))
+ant_vif   <- vif_tbl %>%
+  filter(term %in% antecedent_terms) %>%
+  pull(`VIF equivalent`)
+
+# accessors for the prose
+med_get <- function(tbl, pred, col) {
+  v <- tbl[[col]][tbl$predictor == pred]
+  if (is.numeric(v)) sprintf("%.3f", v) else as.character(v)
+}
+a_get <- function(mediator, term) {
+  sprintf("%.3f", apaths$estimate[apaths$mediator == mediator & apaths$term == term])
+}
+```
+
+```{r results path model, echo=F, include=T, warning=F, message=F, fig.height=4.8, fig.width=9, fig.alt="Path diagram of significant effects. Domination and Christian nationalism have arrows to consumptive identity; mutualism and political ideology have arrows to non-consumptive identity. Only consumptive identity has an arrow to support. Direct paths from mutualism, domination and political ideology to support are also shown. Christian nationalism has no significant direct path."}
+# Results figure is built from the fitted coefficients, not drawn by hand, so it
+# cannot disagree with the tables.
+results_edges <- function(dv, model, alpha = 0.05) {
+  a <- apaths %>%
+    filter(p < alpha) %>%
+    transmute(from = term, to = mediator, kind = "a",
+              est = estimate, lab = fmt(estimate, 2))
+
+  m <- tidy_svyglm(model) %>% filter(p < alpha)
+
+  b <- m %>%
+    filter(term %in% blocks$identity) %>%
+    transmute(from = term, to = "outcome", kind = "b",
+              est = estimate, lab = fmt(estimate, 2))
+
+  d <- m %>%
+    filter(term %in% antecedent_terms) %>%
+    transmute(from = term, to = "outcome", kind = "direct",
+              est = estimate, lab = fmt(estimate, 2))
+
+  bind_rows(a, b, d) %>%
+    left_join(node_xy, by = c("from" = "node")) %>%
+    left_join(node_xy, by = c("to" = "node"), suffix = c("", "end"))
+}
+
+res_plots <- map2(c("hunting_support", "trapping_support"),
+                  list(hunt_lin, trap_lin),
+                  function(dv, m) {
+                    # name the outcome node rather than relying on a panel title
+                    out_lab <- if (dv == "hunting_support") "Hunting\nsupport"
+                               else "Trapping\nsupport"
+                    nd <- nodes %>%
+                      mutate(label = ifelse(node == "outcome", out_lab, label))
+                    path_plot(results_edges(dv, m), nd, show_labels = TRUE,
+                              split_curves = TRUE)
+                  })
+
+results_plot <- patchwork::wrap_plots(res_plots, ncol = 2) +
+  patchwork::plot_annotation(
+    caption = wrap_cap(c("Significant paths only (p < .05), design-weighted.",
+                         "All values are unstandardized coefficients. Black straight",
+                         "arrows are paths through identity; grey curved arrows are direct",
+                         "paths from the antecedent orientations to support. Absence of an",
+                         "arrow indicates a non-significant path."), width = 110),
+    theme = theme(plot.caption = element_text(color = "grey45", hjust = 0,
+                                              size = rel(0.8), family = fam)))
+
+results_plot
+
+ggsave(here("figs", "path_model_results.png"), results_plot,
+       width = 9, height = 4.8, dpi = 300, device = agg_png)
+```
+
+A note on reading the *a*-paths. Christian nationalism shows a weak positive path to non-consumptive identity (`r a_get("ID_non_consume_z", "christian_nationalism_score_z")`) alongside its much stronger path to consumptive identity. That crossover is an artifact of the general factor rather than a substantive association: the two composites correlate .58 and share a dominant general dimension, so any predictor of one shows a weak association with the other through shared variance alone. Estimating the same paths with consumptive identity controlled, isolating the specific component, reverses the sign to `r ap_ctrl("christian_nationalism_score_z")`, and domination moves from null to `r ap_ctrl("wvo_domination_z")`. Net of general identification the structure is cleanly bipolar: mutualism (`r ap_ctrl("wvo_mutualism_z")`) and political ideology (`r ap_ctrl("political_ideology_z")`) push toward non-consumptive identification, domination and Christian nationalism away from it. The uncontrolled paths are reported above because they are the ones the mediation model uses; the controlled estimates are the ones to interpret substantively.
+
+The two panels make the central result visible. Every orientation reaches support somehow, but they take different routes. Mutualism, domination and political ideology retain direct paths after identity is controlled. Christian nationalism does not reach trapping support directly at all, and reaches hunting support only weakly. For both outcomes its main route runs through consumptive identity. And of the two identity constructs, only the consumptive one carries a path forward.
+
+## Interpretation
+
+The findings below are ordered by how much they change the picture, not by effect size. The full models account for `r pc_of(hunt_lin)`% of the variance in hunting support and `r pc_of(trap_lin)`% in trapping support.
+
+**The four antecedent orientations are independent of one another and reach support by different routes.** This is the central result, and it cuts against a common simplification. Wildlife value orientations, political ideology and Christian nationalism are routinely treated, in commentary and often implicitly in interpretation, as facets of a single conservative-versus-liberal disposition toward wildlife. They are not.
+
+They are empirically distinct to begin with. The largest correlation among the four is `r fmt(ant_max_r)`, their variance inflation factors range from `r fmt(min(ant_vif))` to `r fmt(max(ant_vif))`, and all four retain effects in the presence of the other three. The two blocks contribute comparably to explained variance: ideological orientations add `r d_r2(hunt_models, "ideological")` and wildlife value orientations `r d_r2(hunt_models, "wvo")` for hunting support, `r d_r2(trap_models, "ideological")` and `r d_r2(trap_models, "wvo")` for trapping. Neither family is redundant with the other.
+
+More importantly, they behave differently. Each predicts one identity and not the other: domination and Christian nationalism predict consumptive identity, with mutualism and political ideology null; mutualism and political ideology predict non-consumptive identity, with domination null. Net of the general identification factor the separation is sharper still, with domination and Christian nationalism predicting non-consumptive identity *negatively*. And each takes a different route to the outcome: one fully through identity, one partly, two not at all. Four predictors a reader might expect to be near-substitutes operate through four distinguishable mechanisms.
+
+**Christian nationalism reaches support almost entirely through identity.** For trapping support its direct effect is `r med_get(med_trap, "christian_nationalism_score_z", "direct")` and not significant, while its indirect effect through consumptive identity is `r med_get(med_trap, "christian_nationalism_score_z", "indirect")` with a bootstrap interval of `r med_get(med_trap, "christian_nationalism_score_z", "95% CI")`, or `r med_get(med_trap, "christian_nationalism_score_z", "% of total")` of the total effect. For hunting support the indirect route accounts for `r med_get(med_hunt, "christian_nationalism_score_z", "% of total")`, alongside a small direct effect that remains significant.
+
+The substantive reading is that Christian nationalism does not generate beliefs about wildlife. Were it doing so, it would show a direct path in the way mutualism does. What it appears to track is membership in a particular social and moral world, and that membership predicts support. The wildlife attitude is downstream of social location rather than of theology. Domination sits between the two cases, working partly through identity (`r med_get(med_hunt, "wvo_domination_z", "% of total")` of its total effect for hunting, `r med_get(med_trap, "wvo_domination_z", "% of total")` for trapping) and partly directly, which fits a construct that is both a belief about human–animal relations and a stance associated with particular communities.
+
+**Identity is an asymmetric pathway.** Consumptive identity is the strongest of the constructs of theoretical interest (`r b_of(hunt_lin, "ID_consum_z")` for hunting, `r b_of(trap_lin, "ID_consum_z")` for trapping), exceeding any single value orientation. Non-consumptive identity predicts neither outcome (`r b_of(hunt_lin, "ID_non_consume_z")`, `r b_of(trap_lin, "ID_non_consume_z")`).
+
+That null is a result rather than a failure, and it is more interesting than it first appears. Non-consumptive identity is a reliable, well-structured construct with coherent antecedents: mutualism (`r a_get("ID_non_consume_z", "wvo_mutualism_z")`) and political ideology (`r a_get("ID_non_consume_z", "political_ideology_z")`) both predict it strongly. The pathway into it exists and then dead-ends. Mutualism and political ideology shape identity; they simply shape an identity that does not carry forward to positions on these practices. Identifying with hunters, ranchers and landowners commits a person to something; identifying with environmentalists, wildlife viewers and outdoor recreationists does not, at least not here.
+
+**The two identities are not opposing poles.** They correlate positively, and a general factor accounts for most of the reliable variance across the nine items. People who identify with consumptive groups also tend to identify with non-consumptive ones. A literature treating these as a trade-off is assuming a structure the data contradict, and the asymmetry above means the two are not merely non-opposed but differently consequential.
+
+**Social exposure matters more for hunting than for trapping.** Knowing a hunter predicts support for both practices, but the effect is well over twice as large for hunting (`r b_of(hunt_lin, "knows_hunter")`) as for trapping (`r b_of(trap_lin, "knows_hunter")`), and the hierarchical decomposition is starker still: exposure adds `r d_r2(hunt_models, "exposure")` to R² for hunting against `r d_r2(trap_models, "exposure")` for trapping. Personal familiarity normalizes hunting substantially and trapping only marginally, which is what one would expect if acquaintance conveys information about hunting specifically rather than about consumptive wildlife use in general. The cut-point analysis sharpens this further: the effect concentrates at the bottom of the scale, moving people out of outright opposition without pushing them toward strong support.
+
+**Wildlife value orientations behave as the cognitive hierarchy predicts.** Mutualism is negatively associated with support for both practices (`r b_of(hunt_lin, "wvo_mutualism_z")`, `r b_of(trap_lin, "wvo_mutualism_z")`) and domination positively (`r b_of(hunt_lin, "wvo_domination_z")`, `r b_of(trap_lin, "wvo_domination_z")`), all at *p* < .001, and both retain their effects after identity is entered. Political ideology contributes independently but more modestly (`r b_of(hunt_lin, "political_ideology_z")`, `r b_of(trap_lin, "political_ideology_z")`).
+
+**Several demographic effects are substantial.** Women are less supportive of both practices (`r b_of(hunt_lin, "female")`, `r b_of(trap_lin, "female")`). Dietary position matters for hunting in particular: respondents who eat meat are `r b_of(hunt_lin, "eats_meat_n")` scale points more supportive of hunting than those who do not, though the vegetarian group is small (about 6%) and the estimate correspondingly imprecise. Age is associated with lower support for both, and markedly so for trapping (`r b_of(trap_lin, "age_group50-64")` and `r b_of(trap_lin, "age_group65+")`, against `r b_of(hunt_lin, "age_group50-64")` and `r b_of(hunt_lin, "age_group65+")` for hunting). Middle-income respondents are more supportive than the lowest bracket, though the pattern is not monotonic. Education and pet ownership are unrelated to either outcome.
+
+**The two outcomes differ in what drives them.** Hunting support is more responsive to personal experience (knowing a hunter, eating meat), while trapping support is more strongly patterned by age, with respondents over 50 markedly less supportive. Christian nationalism's route to trapping is almost wholly indirect, where for hunting a direct path remains. Trapping appears to be the more socially distant practice: fewer people have direct experience of it, and attitudes toward it are correspondingly more a function of who someone is than of what they have encountered.
+
+## Robustness: is consumptive identity distinct from support?
+
+The consumptive identity scale includes `identify_hunters`, and it is reasonable to ask whether identifying with hunters is meaningfully different from supporting hunting. If the identity effect were a restatement of the outcome, the analysis would be circular.
+
+```{r identity distinctness, echo=F, include=T, warning=F, message=F}
+consum_items    <- identity_scales$ID_consum
+consum_items_nh <- setdiff(consum_items, "identify_hunters")
+
+# use = "complete.obs": identity ITEMS can be missing where the composite is
+# not, because the min-items rule tolerates gaps. Without it cor() returns NA.
+r_with <- function(x, y) cor(x, y, use = "complete.obs")
+
+tibble(measure = c("Consumptive identity (6 items)",
+                   "Consumptive identity (excluding identify_hunters)",
+                   "identify_hunters (single item)"),
+       `r with hunting support`  = c(
+         r_with(model_cc$ID_consum,        model_cc$hunting_support),
+         r_with(composite(model_cc, consum_items_nh), model_cc$hunting_support),
+         r_with(model_cc$identify_hunters, model_cc$hunting_support)),
+       `r with trapping support` = c(
+         r_with(model_cc$ID_consum,        model_cc$trapping_support),
+         r_with(composite(model_cc, consum_items_nh), model_cc$trapping_support),
+         r_with(model_cc$identify_hunters, model_cc$trapping_support))) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3))) %>%
+  ktab(caption = "Association between consumptive identity and the outcomes")
+
+# refit both outcomes with the reduced composite
+model_cc <- model_cc %>%
+  mutate(ID_consum_nh_z = as.numeric(scale(composite(., consum_items_nh))))
+design_nh <- model_cc %>% as_survey_design(ids = 1, weights = weight)
+
+preds_nh <- gsub("^ID_consum_z$", "ID_consum_nh_z", all_predictors)
+
+nh_fits <- map(outcome_vars, ~ svyglm(build_formula(.x, preds_nh),
+                                      design = design_nh)) %>%
+  setNames(outcome_vars)
+
+map_dfr(outcome_vars, function(dv) {
+  full <- if (dv == "hunting_support") hunt_lin else trap_lin
+  tibble(Outcome = dv,
+         `b (6 items)`   = fmt(coef(full)[["ID_consum_z"]], 3),
+         `b (5 items)`   = fmt(coef(nh_fits[[dv]])[["ID_consum_nh_z"]], 3),
+         `R2 (6 items)`  = fmt(r2_svyglm(full), 3),
+         `R2 (5 items)`  = fmt(r2_svyglm(nh_fits[[dv]]), 3))
+}) %>%
+  ktab(caption = paste("Consumptive identity effect with and without the",
+                       "hunting item. Both reduced-model coefficients remain",
+                       "significant at p < .001."))
+```
+
+Three observations argue that the constructs are distinct. The composite correlates `r fmt(r_with(model_cc$ID_consum, model_cc$hunting_support))` with hunting support, sharing roughly `r fmt(100 * r_with(model_cc$ID_consum, model_cc$hunting_support)^2, 0)`% of its variance, related but far from redundant. The single most exposed item, `identify_hunters`, correlates `r fmt(r_with(model_cc$identify_hunters, model_cc$hunting_support))` with hunting support and `r fmt(r_with(model_cc$identify_hunters, model_cc$trapping_support))` with trapping support; a proxy for hunting attitudes would not track trapping almost equally well. And removing that item leaves the identity effect significant in both models with R² changing by less than .01, and leaves every mediation result intact.
+
+The six-item composite is retained. Dropping a cleanly loading item to pre-empt an objection would concede more than the evidence warrants, though the reduced specification is available as a robustness check.
+
+# Tables and Figures for Publication
+
+```{r pub labels, echo=F, include=F, warning=F, message=F}
+term_labels <- c(
+  "age_group30-49"                = "Age 30-49",
+  "age_group50-64"                = "Age 50-64",
+  "age_group65+"                  = "Age 65+",
+  "income_cat15-50k"              = "Income 15-50k",
+  "income_cat50-75k"              = "Income 50-75k",
+  "income_cat75-100k"             = "Income 75-100k",
+  "income_cat100-150k"            = "Income 100-150k",
+  "income_cat150-200k"            = "Income 150-200k",
+  "income_cat200k+"               = "Income 200k+",
+  "female"                        = "Female",
+  "college_grad"                  = "College graduate",
+  "has_pets_n"                    = "Has pets",
+  "eats_meat_n"                   = "Eats meat",
+  "knows_hunter"                  = "Knows a hunter",
+  "wvo_mutualism_z"               = "Mutualism",
+  "wvo_domination_z"              = "Domination",
+  "political_ideology_z"          = "Political ideology (liberal)",
+  "christian_nationalism_score_z" = "Christian nationalism",
+  "ID_consum_z"                   = "Consumptive identity",
+  "ID_non_consume_z"              = "Non-consumptive identity")
+
+block_labels <- c(demographics   = "Demographics",
+                  exposure       = "Exposure",
+                  ideological = "Ideological orientations",
+                  wvo            = "Wildlife value orientations",
+                  identity       = "Identity")
+
+assign_block <- function(terms) {
+  map_chr(terms, function(tm) {
+    hit <- map_lgl(blocks, ~ any(str_starts(tm, fixed(.x))))
+    if (any(hit)) names(blocks)[which(hit)[1]] else NA_character_
+  })
+}
+
+tidy_full <- function(m, outcome) {
+  tidy_svyglm(m) %>%
+    mutate(outcome   = outcome,
+           conf_low  = estimate - qnorm(0.975) * se,
+           conf_high = estimate + qnorm(0.975) * se,
+           block     = assign_block(term),
+           label     = coalesce(term_labels[term], term))
+}
+
+coefs <- bind_rows(tidy_full(hunt_lin, "Hunting support"),
+                   tidy_full(trap_lin, "Trapping support")) %>%
+  mutate(block   = factor(block, levels = names(block_labels), labels = block_labels),
+         outcome = factor(outcome, levels = c("Hunting support", "Trapping support")))
+
+# a term failing to match a block would vanish from the figure without warning
+stopifnot(!any(is.na(coefs$block)))
+```
+
+```{r figure coefficients, echo=F, include=T, warning=F, message=F, fig.height=6, fig.width=8}
+plot_order <- coefs %>%
+  filter(outcome == "Hunting support") %>%
+  arrange(block, estimate) %>%
+  pull(label)
+
+coef_plot <- coefs %>%
+  mutate(label = factor(label, levels = plot_order)) %>%
+  ggplot(aes(x = estimate, y = label, color = block, shape = block)) +
+  geom_vline(xintercept = 0, color = "grey55", linewidth = 0.4) +
+  geom_errorbarh(aes(xmin = conf_low, xmax = conf_high), height = 0, linewidth = 0.5) +
+  geom_point(size = 2) +
+  facet_wrap(~ outcome) +
+  # sized from the number of blocks, so adding or splitting a block cannot
+  # leave the palette short
+  scale_color_manual(values = okabe_ito[seq_along(block_labels)]) +
+  scale_shape_manual(values = c(16, 17, 15, 18, 8)[seq_along(block_labels)]) +
+  scale_y_discrete(limits = rev) +
+  labs(x = "Change in support (scale points)", y = NULL,
+       caption = wrap_cap(paste0(
+         "Design-weighted linear regression, n = ", n_fmt(nrow(model_cc)),
+         ". Points are coefficients with 95% confidence intervals. Continuous ",
+         "predictors are standardized, so estimates are scale points per SD. ",
+         "Reference categories: age 18-29, income under 15k."), width = 105)) +
+  theme(panel.grid.minor   = element_blank(),
+        panel.grid.major.y = element_line(color = "grey92", linewidth = 0.3),
+        legend.title    = element_blank(),
+        legend.position = "top",
+        plot.caption    = element_text(color = "grey45", hjust = 0, size = rel(0.75)),
+        axis.title      = element_text(color = "grey20"),
+        strip.text      = element_text(face = "bold", hjust = 0))
+
+coef_plot
+
+ggsave(here("figs", "coefficient_plot.png"), coef_plot,
+       width = 8, height = 6, dpi = 300, device = agg_png)
+```
+
+```{r table 1 sample, echo=F, include=T, warning=F, message=F}
+cat_summary <- map_dfr(c("age_group", "income_cat"), function(v) {
+  unwt <- model_cc %>% count(level = .data[[v]]) %>%
+    mutate(variable = v, pct_unwt = 100 * n / sum(n))
+  wt <- design_cc %>% group_by(level = !!sym(v)) %>%
+    dplyr::summarize(pct_wt = survey_prop(vartype = NULL)) %>%
+    mutate(pct_wt = 100 * pct_wt)
+  left_join(unwt, wt, by = "level")
+})
+
+bin_summary <- map_dfr(c("female", "college_grad", "has_pets_n", "eats_meat_n",
+                         "knows_hunter"), function(v) {
+  tibble(variable = v, level = "Yes",
+         n        = sum(model_cc[[v]] == 1, na.rm = TRUE),
+         pct_unwt = 100 * mean(model_cc[[v]], na.rm = TRUE),
+         pct_wt   = 100 * as.numeric(coef(svymean(make.formula(v), design_cc,
+                                                  na.rm = TRUE))))
+})
+
+bind_rows(cat_summary, bin_summary) %>%
+  mutate(variable = coalesce(term_labels[variable], variable),
+         across(c(pct_unwt, pct_wt), ~ round(.x, 1))) %>%
+  dplyr::select(Variable = variable, Level = level, n,
+                `% unweighted` = pct_unwt, `% weighted` = pct_wt) %>%
+  ktab(caption = paste0("Table 1. Sample characteristics (n = ", n_fmt(nrow(model_cc)),
+                        "). Percentages unweighted and design-weighted."))
+```
+
+```{r table 2 correlations, echo=F, include=T, warning=F, message=F}
+cont_raw <- c("hunting_support", "trapping_support", "wvo_mutualism",
+              "wvo_domination", "political_ideology",
+              "christian_nationalism_score", "ID_consum", "ID_non_consume")
+
+cont_labels <- c("Hunting support", "Trapping support", "Mutualism", "Domination",
+                 "Political ideology", "Christian nationalism",
+                 "Consumptive identity", "Non-consumptive identity")
+
+cor_mat <- cor(model_cc[, cont_raw], use = "pairwise.complete.obs")
+cor_mat[upper.tri(cor_mat, diag = TRUE)] <- NA
+
+tibble(Variable = paste0(seq_along(cont_raw), ". ", cont_labels),
+       Mean     = round(colMeans(model_cc[, cont_raw], na.rm = TRUE), 2),
+       SD       = round(apply(model_cc[, cont_raw], 2, sd, na.rm = TRUE), 2)) %>%
+  bind_cols(as.data.frame(round(cor_mat, 2)) %>% setNames(seq_along(cont_raw))) %>%
+  ktab(caption = paste("Table 2. Descriptives and correlations among continuous",
+                       "variables, on original response scales. Correlations",
+                       "are unweighted."))
+```
+
+```{r table 3 full model, echo=F, include=T, warning=F, message=F}
+coef_wide <- coefs %>%
+  mutate(cell = paste0(sprintf("%.3f", estimate), stars(p),
+                       " (", sprintf("%.3f", se), ")")) %>%
+  dplyr::select(block, label, outcome, cell) %>%
+  pivot_wider(names_from = outcome, values_from = cell) %>%
+  arrange(block)
+
+block_index <- coef_wide %>% count(block) %>% deframe()
+
+coef_wide %>%
+  dplyr::select(Predictor = label, `Hunting support`, `Trapping support`) %>%
+  kable(caption = paste0(
+    "Table 3. Design-weighted linear regression predicting support for hunting ",
+    "and trapping (n = ", n_fmt(nrow(model_cc)), "). Cells are unstandardized ",
+    "coefficients with standard errors in parentheses. Continuous predictors ",
+    "are standardized. Reference categories: age 18-29, income under 15k. ",
+    "* p < .05, ** p < .01, *** p < .001.")) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"),
+                full_width = FALSE, position = "left") %>%
+  pack_rows(index = block_index)
+```
+
+Table 3 and the coefficient figure carry the same information deliberately. Most journals will take one or the other; the figure communicates the pattern at a glance, the table gives exact values. Whichever does not appear in the main text works as a supplement.
