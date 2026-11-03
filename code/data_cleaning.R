@@ -227,7 +227,8 @@ identity_df <- recode_block(data, vsid, identity_labels, lv_identify)
 cns_labels <- setNames(paste0("cns_item", 1:6), paste0("Q32_", 1:6))
 cns_df <- recode_block(data, vsid, cns_labels, lv_agree5)
 cns_df <- cns_df %>%
-  mutate(christian_nationalism_score = rowMeans(
+  mutate(cns_item3 = 6 - cns_item3,
+    christian_nationalism_score = rowMeans(
       cbind(
         cns_item1,
         cns_item2,
@@ -297,4 +298,5 @@ saveRDS(species_responses, here("data", "species_responses.rds"))
 saveRDS(attacc_long,       here("data", "attacc_long.rds"))
 saveRDS(personal_weights,  here("data", "personal_weights.rds"))
 saveRDS(survey_design,     here("data", "survey_design.rds"))
+saveRDS(personal,          here("data", "personal.rds"))
 
