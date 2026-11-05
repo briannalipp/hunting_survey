@@ -64,8 +64,15 @@ species_responses <- data %>%
 # -----------------------------------------------------------------------------
 # CHANGE LIKERTS TO NUMERICS
 # -----------------------------------------------------------------------------
+
 likert_to_num <- function(x, levels_in_order) {
-  as.numeric(factor(x, levels = levels_in_order))}
+  x_clean <- trimws(x)
+  x_clean[x_clean == ""] <- NA
+  out <- as.numeric(factor(x_clean, levels = levels_in_order))
+  bad <- !is.na(x_clean) & is.na(out)
+  if (any(bad)) warning("Unmatched labels: ", paste(unique(x_clean[bad]), collapse = " | "))
+  out
+}
 
 lv_attitude     <- c("Strongly dislike", "Somewhat dislike", "Neither like nor dislike", "Somewhat like", "Strongly like")
 lv_approve      <- c("Strongly disapprove", "Somewhat disapprove", "Neither approve nor disapprove", "Somewhat approve", "Strongly approve")
@@ -299,4 +306,3 @@ saveRDS(attacc_long,       here("data", "attacc_long.rds"))
 saveRDS(personal_weights,  here("data", "personal_weights.rds"))
 saveRDS(survey_design,     here("data", "survey_design.rds"))
 saveRDS(personal,          here("data", "personal.rds"))
-

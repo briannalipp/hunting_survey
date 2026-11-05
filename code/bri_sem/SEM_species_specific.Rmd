@@ -1,5 +1,100 @@
 ---
-title: "SEM_species_specific"
-output: html_document
+title: "Structural Equation Modeling: Investigating Species-Specific Hunting Support"
+author: "Brianna Lipp"
+date: "`r Sys.Date()`"
+output: html_document:
+  theme: journal
+  toc: true
+  toc_float: true
 ---
 
+ANNA IS GOING TO MAKE A KEY FOR THE FOLLOWING CHANGE TO NUMERIC
+#knows a hunter, age, gender, education, income, region, metro status
+
+
+# Introduction
+
+Load libraries and pull in data from data_cleaning.R (personal_weights and species_responses). Also print out a column of variables and variable types so I can check on data before running it.
+
+```{r load data, echo=F, warning=T, message=T}
+library(here)
+library(tidyverse)
+library(ggrepel)
+library(psych)
+library(lavaan)
+library(knitr)
+
+pers <- readRDS(here("data", "personal_weights.rds"))
+sp <- readRDS(here("data", "species_responses.rds")) %>%
+  filter(vsid %in% pers$vsid)
+
+summ <- function(df) tibble(
+  variable = names(df),
+  type = map_chr(df, ~ class(.x)[1]),
+  pct_na = round(map_dbl(df, ~ mean(is.na(.x))) * 100, 1),
+  n_unique = map_int(df, ~ n_distinct(.x, na.rm = TRUE))
+)
+
+print(summ(sp), n = Inf)
+print(summ(pers), n = Inf)
+
+```
+Running some exploratory factor analysis on these characteristics. Trying 3 or 4 to see which works
+
+```{r}
+chars <- c("conservation_status", "edibility", "familiarity", "desire_to_see", "wtp_hunt", "wtp_view", "danger_humans", "destructive_property")
+
+X <- sp %>%
+  filter(if_all(all_of(chars), ~ !is.na(.x))) %>%
+  select(all_of(chars))
+
+fa.parallel(X, fa = "fa", cor = "poly")   #suggests how many factors
+efa <- fa(X, nfactors = 3, cor = "poly", rotate = "oblimin") #trying 3
+print (efa$loadings, cutoff = 0.3)
+
+efa$Phi
+```
+Tried on both 3 and 4, 3 loads better. Edibility kind of sticks out on its own. Thinking of these final species-level boxes.
+
+1) Value (desire to see, WTP (see), WTP (hunt))
+2) Threat (danger, destructiveness)
+3) Commonness (familiarity, conservation status)
+4) Edibility
+
+
+
+Running another factor analysis on the personal/demographics data.
+```{r}
+idvars <- grep("^identify_", names(pers), value = TRUE)
+fa.parallel(pers[, idvars], fa = "fa", cor = "poly")
+efa_id <- fa(pers[, idvars], nfactors = 2, cor = "poly", rotate = "oblimin")
+print(efa_id$loadings, cutoff = 0.3)
+```
+Showing that there's a consumptive/land-based identity set and a non-consumptive set.
+
+1) MR1: hunters, ranchers, farmers, anglers, small business, landowners
+2) MR2: outdoor viewers, outdoor rec, environmentalists
+
+Small business and landowners load below the rest,but I think it's fine.
+
+Now trying to run a CFA on what we have so far.
+
+```{r}
+cfa_mod <- '
+  mutualism      =~ wvo_animal_rights + wvo_one_family + wvo_side_by_side
+  domination     =~ wvo_human_needs_priority + wvo_wildlife_for_use + wvo_kill_if_threat
+  cns            =~ cns_item1 + cns_item2 + cns_item3 + cns_item4 + cns_item5 + cns_item6
+  consumptive    =~ identify_hunters + identify_ranchers + identify_farmers +
+                    identify_small_business + identify_landowners + identify_anglers
+  nonconsumptive =~ identify_environmentalists + identify_outdoor_rec + identify_outdoor_viewers
+'
+ords <- grep("^(wvo_(animal|one|side|human|wildlife|kill)|cns_item|identify_)", names(pers), value = TRUE)
+fit  <- cfa(cfa_mod, data = pers, ordered = ords, estimator = "WLSMV")
+
+fitMeasures(fit, c("cfi.scaled", "tli.scaled", "rmsea.scaled", "srmr"))
+standardizedSolution(fit) %>% filter(op == "=~")     # loadings
+standardizedSolution(fit) %>% filter(op == "~~", lhs != rhs)  # factor correlations
+
+efa_id$Phi
+table(pers$eats_meat, pers$game_meat_freq)
+```
